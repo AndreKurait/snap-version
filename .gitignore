@@ -1,0 +1,17 @@
+build/
+.gradle/
+.idea/
+.vscode/
+*.iml
+out/
+.DS_Store
+*.swp
+*.swo
+
+# Local recordings + edits scratched out
+*.cast
+*.gif.tmp
+recording-tmp/
+
+# Test scratch
+/tmp/

@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon test
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-tests-${{ matrix.os }}-reports
+          path: build/reports/tests/test/
+
+  e2e-tests:
+    # Run e2e on every push to main, and on PRs labelled "run-e2e".
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-e2e') || github.event_name == 'workflow_dispatch'
+    name: End-to-end (testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-ubuntu-latest-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Pre-pull docker images (parallel)
+        run: |
+          docker pull opensearchproject/opensearch:2.19.0 &
+          docker pull opensearchproject/opensearch:2.19.4 &
+          docker pull minio/minio:RELEASE.2024-09-13T20-26-02Z &
+          wait
+
+      - name: Run e2e tests
+        run: ./gradlew --no-daemon e2eTest
+
+      - name: Upload e2e reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-reports
+          path: build/reports/tests/e2eTest/

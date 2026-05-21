@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-release-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - id: vars
+        run: |
+          TAG="${GITHUB_REF##refs/tags/}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (version=$VERSION)"
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon test
+
+      - name: Build distribution archives
+        run: ./gradlew --no-daemon distZip distTar -Pversion=${{ steps.vars.outputs.version }}
+
+      - name: Compute checksums
+        run: |
+          cd build/distributions
+          sha256sum *.zip *.tar > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: build/distributions/
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.tar
+            dist/SHA256SUMS.txt
+          body: |
+            ## Install
+
+            ### From a release archive (any OS with Java 21+)
+
+            ```bash
+            curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/download/${{ steps.tag.outputs.tag }}/snap-version-${{ needs.build.outputs.version }}.tar
+            tar -xf snap-version.tar
+            ./snap-version-${{ needs.build.outputs.version }}/bin/snap-version --help
+            ```
+
+            ### Verify checksums
+
+            ```bash
+            curl -L -O https://github.com/AndreKurait/snap-version/releases/download/${{ steps.tag.outputs.tag }}/SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            ## Requirements
+
+            - Java 21+ (Temurin recommended) for the JVM-based release. The release archive is OS-independent — same `.zip`/`.tar` works on Linux x64/arm64, macOS arm64/x64, and Windows x64 (via `bin/snap-version.bat`).
+            - `./gradlew e2eTest` additionally needs Docker.

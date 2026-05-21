@@ -1,0 +1,12 @@
+# Auto-detect text files and normalize to LF on commit.
+* text=auto eol=lf
+
+# Binaries
+*.jar binary
+*.gif binary
+*.png binary
+*.jpg binary
+*.cast binary
+
+# Linguist hints so GitHub doesn't undercount Java.
+docker/* linguist-vendored

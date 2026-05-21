@@ -1,0 +1,122 @@
+plugins {
+    id 'application'
+    id 'java'
+}
+
+import java.time.Duration
+
+group = 'io.kurait.snapversion'
+version = project.findProperty('version') == 'unspecified' || project.findProperty('version') == null ? '0.1.0' : project.findProperty('version')
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    jacksonVersion = '2.17.2'
+    awsSdkVersion = '2.28.16'
+    picocliVersion = '4.7.6'
+}
+
+dependencies {
+    // CLI
+    implementation "info.picocli:picocli:${picocliVersion}"
+    annotationProcessor "info.picocli:picocli-codegen:${picocliVersion}"
+
+    // Smile + JSON
+    implementation "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-smile:${jacksonVersion}"
+
+    // TUI
+    implementation 'com.googlecode.lanterna:lanterna:3.1.2'
+
+    // AWS S3
+    implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:auth:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:regions:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:apache-client:${awsSdkVersion}"
+
+    // Logging
+    implementation 'org.slf4j:slf4j-simple:2.0.13'
+
+    // Tests
+    testImplementation platform('org.junit:junit-bom:5.10.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.assertj:assertj-core:3.26.3'
+
+    // E2E: testcontainers 1.21.4 includes the Docker 29.x compatibility fix
+    // (see testcontainers/testcontainers-java#11212).
+    testImplementation 'org.testcontainers:testcontainers:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation 'org.opensearch.client:opensearch-rest-client:2.15.0'
+    testImplementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    testImplementation 'org.slf4j:slf4j-simple:2.0.13'
+}
+
+application {
+    mainClass = 'io.kurait.smile.Main'
+    applicationName = 'snap-version'
+    applicationDefaultJvmArgs = [
+        '-Dorg.slf4j.simpleLogger.defaultLogLevel=info',
+        '-Dorg.slf4j.simpleLogger.showDateTime=true',
+        '-Dorg.slf4j.simpleLogger.dateTimeFormat=HH:mm:ss',
+    ]
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ['-Xlint:all', '-Xlint:-processing']
+}
+
+test {
+    useJUnitPlatform {
+        // Default `./gradlew test` runs unit tests only; the e2e suite is gated on a separate task.
+        excludeTags 'e2e'
+    }
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+    }
+}
+
+tasks.register('e2eTest', Test) {
+    description = 'Run the end-to-end downgrade test against `docker compose` containers ' +
+            '(spun up automatically). Requires Docker.'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'e2e'
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    testLogging {
+        events 'started', 'passed', 'skipped', 'failed', 'standard_out', 'standard_error'
+        showStandardStreams = true
+        exceptionFormat 'full'
+    }
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'info'
+    timeout = Duration.ofMinutes(20)
+}
+
+// Make the produced shadow-like fat tarball easy to find
+tasks.named('installDist') {
+    description = 'Install runnable distribution under build/install/snap-version'
+}
+
+// Reproducible archives so checksums match between runs.
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+// Update the help banner in the picocli command to match the rebrand.
+tasks.withType(JavaCompile).configureEach {
+    inputs.property('appName', 'snap-version')
+}

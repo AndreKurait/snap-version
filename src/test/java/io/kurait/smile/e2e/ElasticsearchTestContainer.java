@@ -48,10 +48,16 @@ public class ElasticsearchTestContainer extends GenericContainer<ElasticsearchTe
                 .withExposedPorts(HTTP_PORT)
                 .withEnv("discovery.type", "single-node")
                 .withEnv("xpack.security.enabled", "false")
-                // ES 7.x bundled JDK doesn't understand cgroup v2 (used on modern kernels
-                // like GitHub-hosted ubuntu-latest), causing NPE in ManagementFactory.
-                // -XX:-UseContainerSupport disables the cgroup-aware JVM heuristics.
-                .withEnv("ES_JAVA_OPTS", "-Xms1g -Xmx1g -XX:-UseContainerSupport")
+                // ES 7.x bundled JDK doesn't fully support cgroup v2 on modern Linux kernels
+                // (e.g. GitHub-hosted ubuntu-latest runners). -XX:-UseContainerSupport disables
+                // the cgroup heuristics entirely. The bootstrap-checks are skipped in single-node
+                // mode but `node.store.allow_mmap=false` removes the dependency on having a
+                // sufficient vm.max_map_count, which the GitHub runners don't always have.
+                .withEnv("ES_JAVA_OPTS",
+                        "-Xms512m -Xmx512m -XX:-UseContainerSupport " +
+                        "-Des.allow_insecure_settings=true")
+                .withEnv("node.store.allow_mmap", "false")
+                .withEnv("bootstrap.memory_lock", "false")
                 .withEnv("s3.client.default.endpoint", minioHostPort)
                 .withEnv("s3.client.default.protocol", "http")
                 .withEnv("s3.client.default.path_style_access", "true")

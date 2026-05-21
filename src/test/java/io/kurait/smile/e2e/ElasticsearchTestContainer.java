@@ -48,7 +48,10 @@ public class ElasticsearchTestContainer extends GenericContainer<ElasticsearchTe
                 .withExposedPorts(HTTP_PORT)
                 .withEnv("discovery.type", "single-node")
                 .withEnv("xpack.security.enabled", "false")
-                .withEnv("ES_JAVA_OPTS", "-Xms1g -Xmx1g")
+                // ES 7.x bundled JDK doesn't understand cgroup v2 (used on modern kernels
+                // like GitHub-hosted ubuntu-latest), causing NPE in ManagementFactory.
+                // -XX:-UseContainerSupport disables the cgroup-aware JVM heuristics.
+                .withEnv("ES_JAVA_OPTS", "-Xms1g -Xmx1g -XX:-UseContainerSupport")
                 .withEnv("s3.client.default.endpoint", minioHostPort)
                 .withEnv("s3.client.default.protocol", "http")
                 .withEnv("s3.client.default.path_style_access", "true")

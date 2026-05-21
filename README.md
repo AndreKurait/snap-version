@@ -34,37 +34,74 @@ snapshot that thinks it was taken on its own version.
 
 ## Install
 
-### Native binary (no Java required)
+Three options, pick the one you like — ranked from "least dependencies" to "most universal":
+
+### 1. Native binary (no Java required, fastest)
+
+Download the right archive for your OS and arch from the
+[latest release](https://github.com/AndreKurait/snap-version/releases/latest):
+
+| Platform | Archive |
+|---|---|
+| Linux x64    | `snap-version-<v>-linux-x64.tar.gz` |
+| Linux arm64  | `snap-version-<v>-linux-arm64.tar.gz` |
+| macOS arm64 (Apple Silicon)  | `snap-version-<v>-macos-arm64.tar.gz` |
+| macOS x64 (Intel)            | `snap-version-<v>-macos-x64.tar.gz` |
+| Windows x64  | `snap-version-<v>-windows-x64.zip` |
 
 ```bash
-# Linux/macOS — pick your platform
+# Linux/macOS
 OS=linux-x64    # or linux-arm64, macos-arm64, macos-x64
 curl -fsSL -o snap-version.tar.gz \
   "https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version-0.1.1-${OS}.tar.gz"
 tar -xzf snap-version.tar.gz
-./snap-version-*/snap-version --help
+cd snap-version-*
 ```
 
-Windows: download `snap-version-<version>-windows-x64.zip` from the
-[Releases page](https://github.com/AndreKurait/snap-version/releases/latest).
+On **macOS**, the binary is unsigned (no $99/yr Apple Developer account), so
+Gatekeeper blocks it on first launch with "could not verify ... is free of
+malware". Clear the quarantine attribute once and you're done:
 
-### JVM distribution (any OS, requires Java 21+)
+```bash
+xattr -cr ./snap-version
+./snap-version --help
+```
 
-The JVM build is the only one with the interactive `tui` subcommand.
+(Or open System Settings → Privacy & Security and click "Open Anyway" after
+the first failed attempt. macOS only does this for the first run — subsequent
+invocations work normally.)
+
+### 2. Fat JAR (works anywhere with Java 21+, no platform-specific download)
+
+```bash
+curl -fsSL -o snap-version.jar \
+  https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version-0.1.1-all.jar
+java -jar snap-version.jar --help
+```
+
+This is the simplest option if you already have Java. ~16 MB, single file, no
+Gatekeeper problem. The fat JAR is the only option that includes the
+interactive `tui` subcommand.
+
+### 3. JVM distribution (the picocli `application` plugin output)
 
 ```bash
 curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version-0.1.1.tar
 tar -xf snap-version.tar
-./snap-version-*/bin/snap-version --help
+./snap-version-0.1.1/bin/snap-version --help
 ```
 
-### From source
+Same thing as option 2, just unpacked into a `bin/` + `lib/` layout with start
+scripts. Useful if you want to symlink `bin/snap-version` into your `$PATH`.
+
+### 4. From source
 
 ```bash
 git clone https://github.com/AndreKurait/snap-version
 cd snap-version
-./gradlew installDist                  # JVM dist  → build/install/snap-version/bin/snap-version
-./gradlew nativeCompile                # native    → build/native/nativeCompile/snap-version
+./gradlew installDist     # JVM dist  → build/install/snap-version/bin/snap-version
+./gradlew fatJar          # fat JAR   → build/libs/snap-version-<v>-all.jar
+./gradlew nativeCompile   # native    → build/native/nativeCompile/snap-version  (needs GraalVM 21)
 ```
 
 ## Quick start

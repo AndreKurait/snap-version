@@ -44,10 +44,12 @@ jobs:
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - run: ./gradlew --no-daemon test
-      - run: ./gradlew --no-daemon distZip distTar -Pversion=${{ steps.vars.outputs.version }}
+      - run: ./gradlew --no-daemon distZip distTar fatJar -Pversion=${{ steps.vars.outputs.version }}
       - run: |
+          # Move the fat jar in alongside the dist archives so SHA256SUMS covers it.
+          cp build/libs/snap-version-*-all.jar build/distributions/
           cd build/distributions
-          sha256sum *.zip *.tar > SHA256SUMS-jvm.txt
+          sha256sum *.zip *.tar *.jar > SHA256SUMS-jvm.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dist-jvm
@@ -60,11 +62,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { label: linux-x64,    os: ubuntu-latest,        arch: x64,    ext: tar.gz, archive: tar }
-          - { label: linux-arm64,  os: ubuntu-24.04-arm,     arch: aarch64, ext: tar.gz, archive: tar }
-          - { label: macos-arm64,  os: macos-14,             arch: aarch64, ext: tar.gz, archive: tar }
-          - { label: macos-x64,    os: macos-13,             arch: x64,    ext: tar.gz, archive: tar }
-          - { label: windows-x64,  os: windows-latest,       arch: x64,    ext: zip,    archive: zip }
+          - { label: linux-x64,    os: ubuntu-latest,        ext: tar.gz, archive: tar }
+          - { label: linux-arm64,  os: ubuntu-24.04-arm,     ext: tar.gz, archive: tar }
+          - { label: windows-x64,  os: windows-latest,       ext: zip,    archive: zip }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -154,9 +154,15 @@ jobs:
             dist/snap-version-*.tar
             dist/snap-version-*.zip
             dist/snap-version-*.tar.gz
+            dist/snap-version-*.jar
             dist/SHA256SUMS.txt
           body: |
             ## Install
+
+            > **macOS users:** the binaries are unsigned (no Apple Developer
+            > account). Use `brew install AndreKurait/tap/snap-version` (recommended)
+            > or the fat JAR (option below) which is unaffected by Gatekeeper
+            > since the JVM itself is already trusted on your machine.
 
             ### Native binary (no Java required)
 
@@ -166,9 +172,14 @@ jobs:
             |---|---|
             | Linux x64    | `snap-version-${{ needs.jvm-dist.outputs.version }}-linux-x64.tar.gz` |
             | Linux arm64  | `snap-version-${{ needs.jvm-dist.outputs.version }}-linux-arm64.tar.gz` |
-            | macOS arm64 (Apple Silicon)  | `snap-version-${{ needs.jvm-dist.outputs.version }}-macos-arm64.tar.gz` |
-            | macOS x64 (Intel)  | `snap-version-${{ needs.jvm-dist.outputs.version }}-macos-x64.tar.gz` |
             | Windows x64  | `snap-version-${{ needs.jvm-dist.outputs.version }}-windows-x64.zip` |
+            | macOS        | use Homebrew (below) or the fat JAR |
+
+            ### macOS via Homebrew
+
+            ```bash
+            brew install AndreKurait/tap/snap-version
+            ```
 
             ```bash
             # Linux/macOS
@@ -176,6 +187,16 @@ jobs:
             tar -xzf snap-version.tar.gz
             ./snap-version-*/snap-version --help
             ```
+
+            ### Fat JAR (any OS, requires Java 21+)
+
+            ```bash
+            curl -L -o snap-version.jar https://github.com/AndreKurait/snap-version/releases/download/${{ needs.jvm-dist.outputs.tag }}/snap-version-${{ needs.jvm-dist.outputs.version }}-all.jar
+            java -jar snap-version.jar --help
+            ```
+
+            This is the simplest install if you already have Java. The fat JAR
+            is the only option that includes the interactive `tui` subcommand.
 
             ### JVM distribution (any OS, requires Java 21+)
 
@@ -185,12 +206,64 @@ jobs:
             ./snap-version-${{ needs.jvm-dist.outputs.version }}/bin/snap-version --help
             ```
 
-            The JVM distribution includes the `tui` subcommand; the native binaries omit
-            it (Lanterna does not currently work cleanly under SubstrateVM).
-
             ### Verify checksums
 
             ```bash
             curl -L -O https://github.com/AndreKurait/snap-version/releases/download/${{ needs.jvm-dist.outputs.tag }}/SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
             ```
+
+  update-homebrew-tap:
+    name: Update Homebrew tap
+    needs: [jvm-dist, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: AndreKurait/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Bump snap-version formula
+        env:
+          VERSION: ${{ needs.jvm-dist.outputs.version }}
+          TAG:     ${{ needs.jvm-dist.outputs.tag }}
+        run: |
+          set -euo pipefail
+          JAR_FILE=$(ls dist/snap-version-*-all.jar | head -1)
+          export SHA=$(sha256sum "$JAR_FILE" | awk '{print $1}')
+          export BASENAME=$(basename "$JAR_FILE")
+          export NEW_URL="https://github.com/AndreKurait/snap-version/releases/download/${TAG}/${BASENAME}"
+          echo "Updating Formula/snap-version.rb -> url=$NEW_URL sha=$SHA version=$VERSION"
+
+          python3 - <<'PY'
+          import re, pathlib, os
+          p = pathlib.Path("homebrew-tap/Formula/snap-version.rb")
+          s = p.read_text()
+          s = re.sub(r'url ".*"',     f'url "{os.environ["NEW_URL"]}"',     s, count=1)
+          s = re.sub(r'sha256 ".*"',  f'sha256 "{os.environ["SHA"]}"',       s, count=1)
+          s = re.sub(r'version ".*"', f'version "{os.environ["VERSION"]}"',  s, count=1)
+          p.write_text(s)
+          print(s)
+          PY
+
+      - name: Commit & push to tap
+        working-directory: homebrew-tap
+        env:
+          TAG: ${{ needs.jvm-dist.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/snap-version.rb
+          if git diff --cached --quiet; then
+            echo "No changes to formula."
+            exit 0
+          fi
+          git commit -m "snap-version $TAG"
+          git push origin HEAD:main

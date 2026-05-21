@@ -78,6 +78,28 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 // ---------------------------------------------------------------------------
+// Fat ("shadow") JAR — a single self-contained JAR users can run with `java -jar`.
+// ---------------------------------------------------------------------------
+task fatJar(type: Jar) {
+    dependsOn configurations.runtimeClasspath
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': 'io.kurait.smile.Main',
+                   'Implementation-Title': 'snap-version',
+                   'Implementation-Version': project.version
+    }
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    with jar
+    // Avoid signing-jar conflicts when shading other JARs.
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA',
+            'META-INF/MANIFEST.MF.*', 'module-info.class'
+}
+
+// Make `./gradlew assemble` produce the fat jar too.
+tasks.named('assemble') { dependsOn 'fatJar' }
+
+// ---------------------------------------------------------------------------
 // Native image
 // ---------------------------------------------------------------------------
 //

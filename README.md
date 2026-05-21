@@ -34,10 +34,26 @@ snapshot that thinks it was taken on its own version.
 
 ## Install
 
-### From a release archive (any OS with Java 21+)
+### Native binary (no Java required)
 
 ```bash
-curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version.tar
+# Linux/macOS — pick your platform
+OS=linux-x64    # or linux-arm64, macos-arm64, macos-x64
+curl -fsSL -o snap-version.tar.gz \
+  "https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version-0.1.1-${OS}.tar.gz"
+tar -xzf snap-version.tar.gz
+./snap-version-*/snap-version --help
+```
+
+Windows: download `snap-version-<version>-windows-x64.zip` from the
+[Releases page](https://github.com/AndreKurait/snap-version/releases/latest).
+
+### JVM distribution (any OS, requires Java 21+)
+
+The JVM build is the only one with the interactive `tui` subcommand.
+
+```bash
+curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/latest/download/snap-version-0.1.1.tar
 tar -xf snap-version.tar
 ./snap-version-*/bin/snap-version --help
 ```
@@ -47,12 +63,9 @@ tar -xf snap-version.tar
 ```bash
 git clone https://github.com/AndreKurait/snap-version
 cd snap-version
-./gradlew installDist
-build/install/snap-version/bin/snap-version --help
+./gradlew installDist                  # JVM dist  → build/install/snap-version/bin/snap-version
+./gradlew nativeCompile                # native    → build/native/nativeCompile/snap-version
 ```
-
-Java 21+ required (Temurin recommended). Same archive works on Linux x64/arm64,
-macOS arm64/x64, and Windows x64 (use `bin/snap-version.bat` on Windows).
 
 ## Quick start
 

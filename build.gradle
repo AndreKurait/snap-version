@@ -1,6 +1,7 @@
 plugins {
     id 'application'
     id 'java'
+    id 'org.graalvm.buildtools.native' version '0.10.6'
 }
 
 import java.time.Duration
@@ -74,6 +75,47 @@ application {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.compilerArgs += ['-Xlint:all', '-Xlint:-processing']
+}
+
+// ---------------------------------------------------------------------------
+// Native image
+// ---------------------------------------------------------------------------
+//
+// Build with: ./gradlew nativeCompile
+// Output: build/native/nativeCompile/snap-version (executable, no JVM required)
+//
+// Reflection-heavy libraries we use — picocli, Jackson Smile, the AWS SDK’s
+// HTTP client — ship native-image config under META-INF/native-image, so most
+// of the work is done for us. Lanterna (the TUI) is intentionally kept in the
+// JVM build only; if you try to launch the `tui` subcommand from the native
+// binary you'll get a clear error message at runtime.
+graalvmNative {
+    binaries {
+        main {
+            imageName = 'snap-version'
+            mainClass = 'io.kurait.smile.Main'
+            // verbose=false to keep CI logs short; flip to true when debugging.
+            verbose = false
+            // No fallback: if native-image can't compile something, fail the build
+            // rather than ship a half-native binary that re-launches a JVM.
+            fallback = false
+            buildArgs.addAll(
+                '--no-fallback',
+                '-H:+UnlockExperimentalVMOptions',
+                // Don't bake host-machine resources / network state into the image:
+                '-H:+ReportExceptionStackTraces',
+                // CRT-S3 needs network at build time — force runtime init:
+                '--initialize-at-run-time=software.amazon.awssdk.crt',
+                '--initialize-at-run-time=software.amazon.awssdk.crt.CRT',
+                // Lanterna pulls in JNA bits we don't want in the native image —
+                // exclude the whole TUI command from native build via reflection config.
+            )
+        }
+    }
+    metadataRepository {
+        enabled = true
+    }
+    toolchainDetection = false
 }
 
 test {

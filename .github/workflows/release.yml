@@ -14,28 +14,26 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build distribution
+  jvm-dist:
+    name: JVM dist (any-OS)
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.vars.outputs.version }}
+      tag:     ${{ steps.vars.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
-
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-release-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-
+          key: gradle-jvm-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
       - id: vars
         run: |
           TAG="${GITHUB_REF##refs/tags/}"
@@ -45,77 +43,154 @@ jobs:
           VERSION="${TAG#v}"
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Releasing $TAG (version=$VERSION)"
-
-      - name: Run unit tests
-        run: ./gradlew --no-daemon test
-
-      - name: Build distribution archives
-        run: ./gradlew --no-daemon distZip distTar -Pversion=${{ steps.vars.outputs.version }}
-
-      - name: Compute checksums
-        run: |
+      - run: ./gradlew --no-daemon test
+      - run: ./gradlew --no-daemon distZip distTar -Pversion=${{ steps.vars.outputs.version }}
+      - run: |
           cd build/distributions
-          sha256sum *.zip *.tar > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+          sha256sum *.zip *.tar > SHA256SUMS-jvm.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-jvm
           path: build/distributions/
 
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+  native:
+    name: Native (${{ matrix.label }})
+    needs: jvm-dist
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x64,    os: ubuntu-latest,        arch: x64,    ext: tar.gz, archive: tar }
+          - { label: linux-arm64,  os: ubuntu-24.04-arm,     arch: aarch64, ext: tar.gz, archive: tar }
+          - { label: macos-arm64,  os: macos-14,             arch: aarch64, ext: tar.gz, archive: tar }
+          - { label: macos-x64,    os: macos-13,             arch: x64,    ext: tar.gz, archive: tar }
+          - { label: windows-x64,  os: windows-latest,       arch: x64,    ext: zip,    archive: zip }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - name: Set up GraalVM 21
+        uses: graalvm/setup-graalvm@v1
         with:
-          name: dist
-          path: dist
+          java-version: "21"
+          distribution: graalvm-community
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          native-image-job-reports: "true"
 
-      - name: Resolve tag
-        id: tag
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-native-${{ matrix.label }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Build native image
+        if: runner.os != 'Windows'
+        run: ./gradlew --no-daemon nativeCompile -Pversion=${{ needs.jvm-dist.outputs.version }}
+      - name: Build native image (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || ^
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          gradlew --no-daemon nativeCompile -Pversion=${{ needs.jvm-dist.outputs.version }}
+
+      - name: Package native binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN_DIR="snap-version-${{ needs.jvm-dist.outputs.version }}-${{ matrix.label }}"
+          mkdir -p "$BIN_DIR"
+          cp build/native/nativeCompile/snap-version "$BIN_DIR/"
+          cp README.md LICENSE "$BIN_DIR/"
+          tar -czf "$BIN_DIR.tar.gz" "$BIN_DIR"
+          ls -la "$BIN_DIR.tar.gz"
+
+      - name: Package native binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $BIN_DIR = "snap-version-${{ needs.jvm-dist.outputs.version }}-${{ matrix.label }}"
+          New-Item -Type Directory $BIN_DIR | Out-Null
+          Copy-Item build/native/nativeCompile/snap-version.exe $BIN_DIR/
+          Copy-Item README.md, LICENSE $BIN_DIR/
+          Compress-Archive -Path $BIN_DIR -DestinationPath "$BIN_DIR.zip"
+          Get-ChildItem "$BIN_DIR.zip"
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: |
+            snap-version-*.tar.gz
+            snap-version-*.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: [jvm-dist, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Generate combined SHA256SUMS
+        run: |
+          cd dist
+          sha256sum snap-version-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.jvm-dist.outputs.tag }}
+          name: ${{ needs.jvm-dist.outputs.tag }}
           generate_release_notes: true
           files: |
-            dist/*.zip
-            dist/*.tar
+            dist/snap-version-*.tar
+            dist/snap-version-*.zip
+            dist/snap-version-*.tar.gz
             dist/SHA256SUMS.txt
           body: |
             ## Install
 
-            ### From a release archive (any OS with Java 21+)
+            ### Native binary (no Java required)
+
+            Pick the archive for your OS and architecture:
+
+            | Platform | File |
+            |---|---|
+            | Linux x64    | `snap-version-${{ needs.jvm-dist.outputs.version }}-linux-x64.tar.gz` |
+            | Linux arm64  | `snap-version-${{ needs.jvm-dist.outputs.version }}-linux-arm64.tar.gz` |
+            | macOS arm64 (Apple Silicon)  | `snap-version-${{ needs.jvm-dist.outputs.version }}-macos-arm64.tar.gz` |
+            | macOS x64 (Intel)  | `snap-version-${{ needs.jvm-dist.outputs.version }}-macos-x64.tar.gz` |
+            | Windows x64  | `snap-version-${{ needs.jvm-dist.outputs.version }}-windows-x64.zip` |
 
             ```bash
-            curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/download/${{ steps.tag.outputs.tag }}/snap-version-${{ needs.build.outputs.version }}.tar
-            tar -xf snap-version.tar
-            ./snap-version-${{ needs.build.outputs.version }}/bin/snap-version --help
+            # Linux/macOS
+            curl -L -o snap-version.tar.gz https://github.com/AndreKurait/snap-version/releases/download/${{ needs.jvm-dist.outputs.tag }}/snap-version-${{ needs.jvm-dist.outputs.version }}-linux-x64.tar.gz
+            tar -xzf snap-version.tar.gz
+            ./snap-version-*/snap-version --help
             ```
+
+            ### JVM distribution (any OS, requires Java 21+)
+
+            ```bash
+            curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/download/${{ needs.jvm-dist.outputs.tag }}/snap-version-${{ needs.jvm-dist.outputs.version }}.tar
+            tar -xf snap-version.tar
+            ./snap-version-${{ needs.jvm-dist.outputs.version }}/bin/snap-version --help
+            ```
+
+            The JVM distribution includes the `tui` subcommand; the native binaries omit
+            it (Lanterna does not currently work cleanly under SubstrateVM).
 
             ### Verify checksums
 
             ```bash
-            curl -L -O https://github.com/AndreKurait/snap-version/releases/download/${{ steps.tag.outputs.tag }}/SHA256SUMS.txt
+            curl -L -O https://github.com/AndreKurait/snap-version/releases/download/${{ needs.jvm-dist.outputs.tag }}/SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
             ```
-
-            ## Requirements
-
-            - Java 21+ (Temurin recommended) for the JVM-based release. The release archive is OS-independent — same `.zip`/`.tar` works on Linux x64/arm64, macOS arm64/x64, and Windows x64 (via `bin/snap-version.bat`).
-            - `./gradlew e2eTest` additionally needs Docker.

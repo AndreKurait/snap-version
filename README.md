@@ -142,8 +142,9 @@ if you only want some of them downgraded.
 ## Tests
 
 ```bash
-./gradlew test       # unit + CLI tests, no Docker needed (~10s)
-./gradlew e2eTest    # full e2e: real OpenSearch + MinIO via testcontainers
+./gradlew test                # unit + CLI tests, no Docker needed (~10s)
+./gradlew e2eTest             # OpenSearch e2e: real clusters via testcontainers (~30s warm)
+./gradlew e2eTestElasticsearch # legacy Elasticsearch (gated separately — ES 7.x is finicky on some Docker hosts)
 ```
 
 The e2e suite (`SnapshotDowngradeE2ETest`) spins up OpenSearch 2.19.4 (source)
@@ -190,7 +191,7 @@ default.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: small, focused PRs;
-add a test in `CliE2ETest` if you change CLI behavior; run `./gradlew test e2eTest`
+add a test in `CliE2ETest` if you change CLI behavior; run `./gradlew test e2eTest e2eTestElasticsearch`
 locally before pushing.
 
 ## License

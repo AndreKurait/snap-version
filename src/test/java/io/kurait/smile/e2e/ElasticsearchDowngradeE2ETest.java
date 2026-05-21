@@ -44,8 +44,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * just OpenSearch. ES uses the straight-decimal {@code Mmrrbb} encoding
  * (e.g. 7.10.2 = 7_100_299) with NO XOR mask, while OpenSearch flips
  * bit 27 via {@code 0x08000000}.
+ * <p><b>CI note:</b> this test currently fails on GitHub-hosted ubuntu-latest
+ * runners because the bundled JDK in ES 7.x docker images doesn't fully
+ * cope with cgroup v2 + the runner's resource constraints. It runs cleanly
+ * on Docker Desktop / macOS / local Linux. Tagged with both {@code @Tag("e2e")}
+ * and {@code @Tag("e2e-elasticsearch")} so CI can opt in/out independently.
  */
 @Tag("e2e")
+@Tag("e2e-elasticsearch")
 class ElasticsearchDowngradeE2ETest {
 
     private static final Logger log = LoggerFactory.getLogger(ElasticsearchDowngradeE2ETest.class);

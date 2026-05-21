@@ -111,11 +111,31 @@ test {
 }
 
 tasks.register('e2eTest', Test) {
-    description = 'Run the end-to-end downgrade test against `docker compose` containers ' +
-            '(spun up automatically). Requires Docker.'
+    description = 'Run testcontainers-based end-to-end tests (excludes ES which is gated separately).'
     group = 'verification'
     useJUnitPlatform {
         includeTags 'e2e'
+        // ES 7.x is finicky on GitHub-hosted runners (cgroup v2 + bundled JDK).
+        // Run it manually with `./gradlew e2eTestElasticsearch` if you have a
+        // Docker host that ES is happy on (Docker Desktop, Colima, local Linux).
+        excludeTags 'e2e-elasticsearch'
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    testLogging {
+        events 'started', 'passed', 'skipped', 'failed', 'standard_out', 'standard_error'
+        showStandardStreams = true
+        exceptionFormat 'full'
+    }
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'info'
+    timeout = Duration.ofMinutes(20)
+}
+
+tasks.register('e2eTestElasticsearch', Test) {
+    description = 'Run the legacy Elasticsearch downgrade test (7.17.28 -> 7.17.0).'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'e2e-elasticsearch'
     }
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath

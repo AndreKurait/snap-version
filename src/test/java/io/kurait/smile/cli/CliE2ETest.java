@@ -59,8 +59,9 @@ class CliE2ETest {
         assertThat(cap.exitCode).isZero();
         assertThat(cap.stdout)
                 .contains("Planned rewrite:")
-                .contains("target version    : 2.19.0")
-                .contains("target version_id : 136407827")
+                .contains("target version           : 2.19.0")
+                .contains("target version_id (OS)   : 136407827")
+                .contains("target version_id (ES)   : 2190099")
                 .contains("Applied changes:")
                 .contains("version: 2.19.4 -> 2.19.0")
                 .contains("version_id: 136408227 -> 136407827");

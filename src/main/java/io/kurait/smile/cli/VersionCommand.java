@@ -83,14 +83,19 @@ public class VersionCommand implements Callable<Integer> {
             // Preview
             System.out.println();
             System.out.println("Planned rewrite:");
-            System.out.printf("  target version    : %s%n", target.asString());
-            System.out.printf("  target version_id : %d (=%d ^ 0x08000000)%n",
-                    target.toOpenSearchId(), target.toOpenSearchId() ^ VersionCodec.MASK);
+            System.out.printf("  target version           : %s%n", target.asString());
+            System.out.printf("  target version_id (OS)   : %d (=%d ^ 0x%x)%n",
+                    target.toOpenSearchId(),
+                    target.toLegacyElasticId(),
+                    VersionCodec.MASK);
+            System.out.printf("  target version_id (ES)   : %d (legacy Elasticsearch encoding)%n",
+                    target.toLegacyElasticId());
             System.out.println("  snapshots:");
             for (var e : selected) {
-                System.out.printf("    - %-30s uuid=%s  current=%s  snap-dat=%s%n",
+                System.out.printf("    - %-30s uuid=%s  current=%-7s  flavor=%-13s snap-dat=%s%n",
                         e.name(), e.uuid(),
                         e.parsedVersion() != null ? e.parsedVersion().asString() : "?",
+                        e.detectedFlavor(),
                         e.snapDatKey() != null ? e.snapDatKey() : "(missing)");
             }
             System.out.println();

@@ -66,7 +66,8 @@ public class VersionRewriter {
             String snapDatKey,                // root-level "snap-<uuid>.dat"
             String versionStringFromIndexN,   // may be null
             Integer versionIdFromSnapDat,     // may be null
-            VersionCodec.Parsed parsedVersion // best-effort decode; may be null on disagreement
+            VersionCodec.Parsed parsedVersion, // best-effort decode; may be null on disagreement
+            VersionCodec.Flavor detectedFlavor // OPENSEARCH (mask bit 27) or ELASTICSEARCH; null if no version_id
     ) {}
 
     /**
@@ -103,6 +104,7 @@ public class VersionRewriter {
             String snapDatKey = snapFilesByUuid.get(uuid);
             Integer versionId = null;
             VersionCodec.Parsed parsed = null;
+            VersionCodec.Flavor flavor = null;
             if (snapDatKey != null) {
                 try {
                     byte[] raw = store.get(snapDatKey);
@@ -111,6 +113,7 @@ public class VersionRewriter {
                     JsonNode vid = tree.path("snapshot").path("version_id");
                     if (vid.isInt() || vid.isLong()) {
                         versionId = vid.asInt();
+                        flavor = VersionCodec.detectFlavor(versionId);
                         try {
                             parsed = VersionCodec.fromAnyId(versionId);
                         } catch (Exception ignored) {}
@@ -124,8 +127,12 @@ public class VersionRewriter {
             if (parsed == null && versionString != null) {
                 try { parsed = VersionCodec.parse(versionString); } catch (Exception ignored) {}
             }
+            // Default flavor when no version_id was present: assume OpenSearch
+            // (modern OS+ES post-7.x repos always carry version_id; legacy ES1-6
+            // may not, but those use a different repo format anyway).
+            if (flavor == null) flavor = VersionCodec.Flavor.OPENSEARCH;
 
-            entries.add(new SnapshotEntry(name, uuid, snapDatKey, versionString, versionId, parsed));
+            entries.add(new SnapshotEntry(name, uuid, snapDatKey, versionString, versionId, parsed, flavor));
         }
 
         return new Inventory(gen, indexNKey, indexN, entries);
@@ -135,13 +142,12 @@ public class VersionRewriter {
 
     public record RewritePlan(
             VersionCodec.Parsed targetVersion,
-            int targetVersionIdOpenSearch,
             List<SnapshotEntry> targets
     ) {}
 
     /** Compute the full rewrite plan for one or more snapshot UUIDs. */
     public RewritePlan plan(VersionCodec.Parsed target, List<SnapshotEntry> selected) {
-        return new RewritePlan(target, target.toOpenSearchId(), selected);
+        return new RewritePlan(target, selected);
     }
 
     /**
@@ -169,10 +175,12 @@ public class VersionRewriter {
                             inv.indexNKey(), inv.indexNKey(), uuid, oldVer, plan.targetVersion().asString()));
                 }
             }
-            // version_id (int) -- present in newer index-N formats
+            // version_id (int) -- present in newer index-N formats. Use the same flavor
+            // the snapshot was originally written in so the cluster sees a consistent value.
             if (snap.has("version_id")) {
                 long oldId = snap.get("version_id").asLong();
-                long newId = plan.targetVersionIdOpenSearch();
+                VersionCodec.Flavor flavor = entryFor(plan.targets(), uuid).detectedFlavor();
+                long newId = plan.targetVersion().toId(flavor);
                 if (oldId != newId) {
                     snap.put("version_id", newId);
                     changes.add(String.format("[%s] %s.snapshots[uuid=%s].version_id: %d -> %d",
@@ -198,7 +206,7 @@ public class VersionRewriter {
                 continue;
             }
             int oldId = snapshot.path("version_id").asInt(0);
-            int newId = plan.targetVersionIdOpenSearch();
+            int newId = plan.targetVersion().toId(e.detectedFlavor());
             if (oldId == newId) continue;
             snapshot.put("version_id", newId);
 
@@ -211,6 +219,13 @@ public class VersionRewriter {
                     safeFormat(oldId), plan.targetVersion().asString()));
         }
         return changes;
+    }
+
+    private static SnapshotEntry entryFor(List<SnapshotEntry> targets, String uuid) {
+        return targets.stream()
+                .filter(e -> uuid != null && uuid.equals(e.uuid()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("no entry for uuid " + uuid));
     }
 
     private static String safeFormat(int id) {

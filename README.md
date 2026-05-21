@@ -156,7 +156,7 @@ return all the original documents.
 |---|---|---|
 | `MetadataCodecTest` | 5 | Codec frame round-trip, DFL\0 detection, bad-CRC + bad-codec rejection |
 | `SmileJsonTest` | 1 | Smile↔JSON with the ES-matching factory |
-| `VersionCodecTest` | 5 | `version_id` encoding for known versions; legacy ES decoding |
+| `VersionCodecTest` | 8 | `version_id` encoding for known OS + ES versions; flavor auto-detection via mask bit |
 | `LocalStoreTest` | 4 | Local filesystem store: round-trip + path-traversal blocked |
 | `VersionRewriterTest` | 4 | Rewrite all / selected / no-op idempotency |
 | `CliE2ETest` | 7 | **Drives the actual CLI in-process — read this for usage examples.** |

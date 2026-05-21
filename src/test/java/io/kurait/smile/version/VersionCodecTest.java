@@ -37,6 +37,36 @@ class VersionCodecTest {
     }
 
     @Test
+    void encodingMatchesKnownElasticsearchIds() {
+        // Verified against elastic/elasticsearch's Version.java constants.
+        assertThat(VersionCodec.parse("7.10.0").toLegacyElasticId()).isEqualTo(7_100_099);
+        assertThat(VersionCodec.parse("7.10.1").toLegacyElasticId()).isEqualTo(7_100_199);
+        assertThat(VersionCodec.parse("7.10.2").toLegacyElasticId()).isEqualTo(7_100_299);
+        assertThat(VersionCodec.parse("7.17.0").toLegacyElasticId()).isEqualTo(7_170_099);
+        assertThat(VersionCodec.parse("7.17.28").toLegacyElasticId()).isEqualTo(7_172_899);
+    }
+
+    @Test
+    void detectFlavorFromVersionId() {
+        // OpenSearch IDs have bit 27 set
+        assertThat(VersionCodec.detectFlavor(VersionCodec.parse("2.19.0").toOpenSearchId()))
+                .isEqualTo(VersionCodec.Flavor.OPENSEARCH);
+        // Legacy ES IDs do not
+        assertThat(VersionCodec.detectFlavor(VersionCodec.parse("7.17.28").toLegacyElasticId()))
+                .isEqualTo(VersionCodec.Flavor.ELASTICSEARCH);
+        // Edge: ES 7.10.2 still ES (no mask)
+        assertThat(VersionCodec.detectFlavor(7_100_299))
+                .isEqualTo(VersionCodec.Flavor.ELASTICSEARCH);
+    }
+
+    @Test
+    void parsedToIdHonorsFlavor() {
+        VersionCodec.Parsed v = VersionCodec.parse("7.17.0");
+        assertThat(v.toId(VersionCodec.Flavor.ELASTICSEARCH)).isEqualTo(7_170_099);
+        assertThat(v.toId(VersionCodec.Flavor.OPENSEARCH)).isEqualTo(7_170_099 ^ VersionCodec.MASK);
+    }
+
+    @Test
     void fromAnyIdAutoSelectsFlavor() {
         // OS id has bit 27 set
         int osId = VersionCodec.parse("2.19.4").toOpenSearchId();

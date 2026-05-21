@@ -33,6 +33,16 @@ public final class VersionCodec {
 
     private VersionCodec() {}
 
+    /**
+     * Encoding flavor for the binary {@code version_id} field. ES uses raw
+     * {@code Mmrrbb} decimal; OpenSearch XORs it with {@link #MASK} to flip
+     * bit 27 so the two flavors don't collide on the wire.
+     */
+    public enum Flavor {
+        OPENSEARCH,
+        ELASTICSEARCH
+    }
+
     /** Parsed OS-style version. */
     public record Parsed(int major, int minor, int revision) {
         public String asString() {
@@ -43,6 +53,9 @@ public final class VersionCodec {
         }
         public int toLegacyElasticId() {
             return (major * 1_000_000) + (minor * 10_000) + (revision * 100) + 99;
+        }
+        public int toId(Flavor flavor) {
+            return flavor == Flavor.ELASTICSEARCH ? toLegacyElasticId() : toOpenSearchId();
         }
     }
 
@@ -71,6 +84,14 @@ public final class VersionCodec {
     /** Decode a legacy ES version_id (no mask). */
     public static Parsed fromLegacyElasticId(int id) {
         return decodeUnmasked(id, "Elasticsearch", id);
+    }
+
+    /**
+     * Detect a flavor from a version_id by checking bit 27. OpenSearch IDs always
+     * have bit 27 set (it's the {@link #MASK}); legacy ES IDs never do.
+     */
+    public static Flavor detectFlavor(int id) {
+        return (id & MASK) != 0 ? Flavor.OPENSEARCH : Flavor.ELASTICSEARCH;
     }
 
     /**

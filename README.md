@@ -119,6 +119,26 @@ Concretely, `version --to <NEW>` does:
 Shard-data files (`__*` blobs), shard-level snap files, index metadata, and
 data are not touched.
 
+## Multi-snapshot / incremental repos
+
+A single repository commonly holds many snapshots of the same indices, where
+each snapshot only stores the new shard data on top of the prior one
+(via `shard_generations`). `snap-version` rewrites versions correctly across
+all of them in one pass:
+
+- **Every snapshot** in `index-N` gets its `version` string updated.
+- **Every** matching `snap-<uuid>.dat` blob has its `version_id` rewritten
+  through the Smile + codec frame.
+- **Shard data files** (`indices/<id>/<shard>/__*` and per-shard
+  `snap-<uuid>.dat`) are not touched, so the increment chain stays intact.
+
+This is verified end-to-end by `IncrementalSnapshotDowngradeE2ETest`: 3
+sequential snapshots on 2.19.4 (3 / 6 / 9 docs), all rejected on 2.19.0,
+one `snap-version version --to 2.19.0` rewrite, then each snapshot restores
+independently on 2.19.0 with the correct doc count and the shared shard
+blobs unchanged. Restrict to a subset with `--snapshot <name>` (repeatable)
+if you only want some of them downgraded.
+
 ## Tests
 
 ```bash
@@ -140,7 +160,8 @@ return all the original documents.
 | `LocalStoreTest` | 4 | Local filesystem store: round-trip + path-traversal blocked |
 | `VersionRewriterTest` | 4 | Rewrite all / selected / no-op idempotency |
 | `CliE2ETest` | 7 | **Drives the actual CLI in-process — read this for usage examples.** |
-| `SnapshotDowngradeE2ETest` (e2e) | 1 | Real cluster pair via testcontainers — the whole point |
+| `SnapshotDowngradeE2ETest` (e2e) | 1 | Single snapshot: 2.19.4 → (rejected) → rewrite → (accepted) on 2.19.0 |
+| `IncrementalSnapshotDowngradeE2ETest` (e2e) | 1 | **Three sequential snapshots in one repo, all downgraded in one rewriter call — each restores independently with the right doc counts (3 / 6 / 9), and the shared shard data blobs are untouched.** |
 | `DockerClientProbeTest` (e2e) | 1 | Sanity: testcontainers can find the docker daemon |
 
 ## Recording the demo

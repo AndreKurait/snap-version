@@ -124,6 +124,10 @@ copy with no concurrent writers.
 ./gradlew e2eTestElasticsearch   # Separate legacy Elasticsearch container fixture
 ```
 
+The e2e tasks build their pinned MinIO fixture from source. The first run also
+needs internet access for its Go image and dependencies; see
+[CONTRIBUTING.md](CONTRIBUTING.md#end-to-end-tests) for details.
+
 Unit tests cover framing and CRC checks, version-ID encoding, local path
 containment, paginated S3 listings using a fake client, rewrite preflight,
 selection, no-op behavior, dry runs, and simulated write failures. Synthetic

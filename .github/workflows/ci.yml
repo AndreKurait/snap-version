@@ -78,9 +78,11 @@ jobs:
       - name: Pre-pull docker images (parallel)
         run: |
           docker pull opensearchproject/opensearch:2.19.0 &
+          target_pull=$!
           docker pull opensearchproject/opensearch:2.19.4 &
-          docker pull minio/minio:RELEASE.2024-09-13T20-26-02Z &
-          wait
+          source_pull=$!
+          wait "$target_pull"
+          wait "$source_pull"
 
       - name: Run e2e tests
         run: ./gradlew --no-daemon e2eTest

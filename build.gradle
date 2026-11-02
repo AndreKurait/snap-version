@@ -117,7 +117,18 @@ test {
     }
 }
 
+// The historical minio/minio image is no longer published. Build the same
+// release from its pinned source commit for disposable e2e fixtures only.
+def testMinioImage = 'snap-version-test-minio:5bf41aff1702'
+tasks.register('buildTestMinio', Exec) {
+    description = 'Build the pinned MinIO fixture used by the Docker end-to-end tests.'
+    group = 'verification'
+    commandLine 'docker', 'build', '--tag', testMinioImage, 'src/test/docker/minio'
+    timeout = Duration.ofMinutes(20)
+}
+
 tasks.register('e2eTest', Test) {
+    dependsOn 'buildTestMinio'
     description = 'Run testcontainers-based end-to-end tests (excludes ES which is gated separately).'
     group = 'verification'
     useJUnitPlatform {
@@ -135,10 +146,12 @@ tasks.register('e2eTest', Test) {
         exceptionFormat 'full'
     }
     systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'info'
+    systemProperty 'snapversion.test.minio.image', testMinioImage
     timeout = Duration.ofMinutes(20)
 }
 
 tasks.register('e2eTestElasticsearch', Test) {
+    dependsOn 'buildTestMinio'
     description = 'Run the legacy Elasticsearch downgrade test (7.17.28 -> 7.17.0).'
     group = 'verification'
     useJUnitPlatform {
@@ -152,6 +165,7 @@ tasks.register('e2eTestElasticsearch', Test) {
         exceptionFormat 'full'
     }
     systemProperty 'org.slf4j.simpleLogger.defaultLogLevel', 'info'
+    systemProperty 'snapversion.test.minio.image', testMinioImage
     timeout = Duration.ofMinutes(20)
 }
 

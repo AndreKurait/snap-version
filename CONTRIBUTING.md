@@ -26,6 +26,13 @@ must not contact AWS or use real repository credentials. Report the environment
 and exact engine pair when sharing an e2e result; do not generalize one fixture's
 success to arbitrary downgrade compatibility.
 
+The e2e tasks first build a local MinIO image from the pinned source commit for
+`RELEASE.2024-09-13T20-26-02Z`; its former published image is unavailable. The first
+build needs internet access to fetch the Go build image and modules and can take
+several minutes. Subsequent builds reuse Docker's layer cache. This historical
+MinIO fixture is for disposable tests only. Both e2e tasks build it automatically;
+`./gradlew buildTestMinio` also prepares it before running tests from an IDE.
+
 ## Submitting a change
 
 1. Fork, create a feature branch.

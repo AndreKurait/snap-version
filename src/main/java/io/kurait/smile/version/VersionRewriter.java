@@ -9,13 +9,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.kurait.smile.codec.MetadataCodec;
 import io.kurait.smile.codec.SmileJson;
 import io.kurait.smile.repo.SnapshotRepo;
-import io.kurait.smile.s3.S3Store;
 import io.kurait.smile.s3.SnapshotStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,7 +81,10 @@ public class VersionRewriter {
         String indexNKey = "index-" + gen;
 
         byte[] indexNBytes = store.get(indexNKey);
-        ObjectNode indexN = (ObjectNode) json.readTree(indexNBytes);
+        JsonNode parsedIndex = json.readTree(indexNBytes);
+        if (!(parsedIndex instanceof ObjectNode indexN) || !indexN.path("snapshots").isArray()) {
+            throw new IOException(indexNKey + " must contain an object with a snapshots array");
+        }
 
         // Build a quick lookup of root-level snap-*.dat files
         List<String> rootFiles = store.listFilesAtLevel("");
@@ -150,82 +153,161 @@ public class VersionRewriter {
         return new RewritePlan(target, selected);
     }
 
-    /**
-     * Apply the rewrite plan: mutates index-N + each selected snap-*.dat in place on S3.
-     * Returns a list of human-readable change descriptions.
-     */
-    public List<String> apply(Inventory inv, RewritePlan plan) throws IOException {
-        List<String> changes = new ArrayList<>();
+    private record PreparedRewrite(
+            Map<String, byte[]> originals,
+            Map<String, byte[]> replacements,
+            List<String> changes
+    ) {}
 
-        // --- Patch index-N ---
-        ObjectNode indexN = inv.indexNTree();
-        ArrayNode snaps = indexN.withArray("snapshots");
-        for (JsonNode node : snaps) {
-            ObjectNode snap = (ObjectNode) node;
-            String uuid = snap.path("uuid").asText(null);
-            boolean selected = plan.targets().stream().anyMatch(e -> uuid != null && uuid.equals(e.uuid()));
-            if (!selected) continue;
-
-            // version (string)
-            if (snap.has("version")) {
-                String oldVer = snap.get("version").asText();
-                if (!plan.targetVersion().asString().equals(oldVer)) {
-                    snap.put("version", plan.targetVersion().asString());
-                    changes.add(String.format("[%s] %s.snapshots[uuid=%s].version: %s -> %s",
-                            inv.indexNKey(), inv.indexNKey(), uuid, oldVer, plan.targetVersion().asString()));
-                }
-            }
-            // version_id (int) -- present in newer index-N formats. Use the same flavor
-            // the snapshot was originally written in so the cluster sees a consistent value.
-            if (snap.has("version_id")) {
-                long oldId = snap.get("version_id").asLong();
-                VersionCodec.Flavor flavor = entryFor(plan.targets(), uuid).detectedFlavor();
-                long newId = plan.targetVersion().toId(flavor);
-                if (oldId != newId) {
-                    snap.put("version_id", newId);
-                    changes.add(String.format("[%s] %s.snapshots[uuid=%s].version_id: %d -> %d",
-                            inv.indexNKey(), inv.indexNKey(), uuid, oldId, newId));
-                }
-            }
-        }
-        byte[] newIndexN = jsonBytesPretty(indexN);
-        store.put(inv.indexNKey(), newIndexN);
-
-        // --- Patch each selected snap-<uuid>.dat ---
-        for (SnapshotEntry e : plan.targets()) {
-            if (e.snapDatKey() == null) {
-                changes.add("[skip] no snap-" + e.uuid() + ".dat in repo (orphan?)");
-                continue;
-            }
-            byte[] raw = store.get(e.snapDatKey());
-            MetadataCodec.Decoded decoded = MetadataCodec.decode(raw, SnapshotRepo.CODEC_SNAPSHOT);
-            JsonNode tree = SmileJson.smileToTree(decoded.smileBytes());
-            ObjectNode snapshot = (ObjectNode) tree.path("snapshot");
-            if (snapshot.isMissingNode() || snapshot.isNull()) {
-                changes.add("[skip] " + e.snapDatKey() + " missing 'snapshot' object");
-                continue;
-            }
-            int oldId = snapshot.path("version_id").asInt(0);
-            int newId = plan.targetVersion().toId(e.detectedFlavor());
-            if (oldId == newId) continue;
-            snapshot.put("version_id", newId);
-
-            byte[] newSmile = SmileJson.treeToSmile(tree);
-            byte[] reframed = MetadataCodec.encode(newSmile, decoded);
-            store.put(e.snapDatKey(), reframed);
-
-            changes.add(String.format("[%s] snapshot.version_id: %d -> %d (%s -> %s)",
-                    e.snapDatKey(), oldId, newId,
-                    safeFormat(oldId), plan.targetVersion().asString()));
-        }
-        return changes;
+    /** Validate and describe a rewrite without writing any objects. */
+    public List<String> preview(Inventory inv, RewritePlan plan) throws IOException {
+        return prepare(inv, plan).changes();
     }
 
-    private static SnapshotEntry entryFor(List<SnapshotEntry> targets, String uuid) {
-        return targets.stream()
-                .filter(e -> uuid != null && uuid.equals(e.uuid()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("no entry for uuid " + uuid));
+    /**
+     * Validate every selected blob before writing, then replace snapshot blobs and
+     * finally the manifest. This is not a transaction across repository objects:
+     * callers must operate on an offline copy and keep a backup for write failures.
+     */
+    public List<String> apply(Inventory inv, RewritePlan plan) throws IOException {
+        PreparedRewrite prepared = prepare(inv, plan);
+        if (prepared.replacements().isEmpty()) return prepared.changes();
+
+        // Detect changes since preflight. This is a guard, not a repository lock;
+        // external writers must remain stopped for the entire operation.
+        for (var entry : prepared.originals().entrySet()) {
+            if (!Arrays.equals(entry.getValue(), store.get(entry.getKey()))) {
+                throw new IOException("repository changed during preflight: " + entry.getKey());
+            }
+        }
+
+        List<String> written = new ArrayList<>();
+        try {
+            for (var entry : prepared.replacements().entrySet()) {
+                store.put(entry.getKey(), entry.getValue());
+                written.add(entry.getKey());
+            }
+        } catch (RuntimeException e) {
+            throw new IOException("rewrite failed; completed writes: " + written
+                    + ". The failed write may also have completed. Restore the offline copy from backup before retrying.", e);
+        }
+        return prepared.changes();
+    }
+
+    private PreparedRewrite prepare(Inventory inv, RewritePlan plan) throws IOException {
+        if (plan.targetVersion() == null) throw new IllegalArgumentException("target version is required");
+        Map<String, SnapshotEntry> selected = new LinkedHashMap<>();
+        for (SnapshotEntry entry : plan.targets()) {
+            if (entry.uuid() == null || selected.putIfAbsent(entry.uuid(), entry) != null) {
+                throw new IOException("selected snapshots must have distinct, non-null UUIDs");
+            }
+            if (entry.snapDatKey() == null) {
+                throw new IOException("missing snapshot metadata for " + entry.uuid() + "; nothing was written");
+            }
+            if (!entry.snapDatKey().equals("snap-" + entry.uuid() + ".dat")
+                    || !SNAP_FILE.matcher(entry.snapDatKey()).matches()) {
+                throw new IOException("invalid root snapshot key: " + entry.snapDatKey());
+            }
+        }
+
+        long currentGeneration = repo.readIndexLatest();
+        if (currentGeneration < 0) currentGeneration = repo.findHighestIndexGeneration();
+        if (currentGeneration != inv.generation()) {
+            throw new IOException("repository generation changed since inventory; reload before rewriting");
+        }
+        byte[] indexBytes = store.get(inv.indexNKey());
+        if (!inv.indexNTree().equals(json.readTree(indexBytes))) {
+            throw new IOException("manifest changed since inventory; reload before rewriting");
+        }
+        ObjectNode indexN = inv.indexNTree().deepCopy();
+        ArrayNode snapshots = (ArrayNode) indexN.get("snapshots");
+        Map<String, ObjectNode> manifestEntries = new LinkedHashMap<>();
+        for (JsonNode node : snapshots) {
+            if (!(node instanceof ObjectNode object) || !object.path("uuid").isTextual()) {
+                throw new IOException("manifest snapshot entries must be objects with a UUID");
+            }
+            String uuid = object.get("uuid").asText();
+            if (manifestEntries.putIfAbsent(uuid, object) != null) {
+                throw new IOException("duplicate snapshot UUID in manifest: " + uuid);
+            }
+        }
+
+        Map<String, byte[]> originals = new LinkedHashMap<>();
+        Map<String, byte[]> replacements = new LinkedHashMap<>();
+        List<String> manifestChanges = new ArrayList<>();
+        List<String> blobChanges = new ArrayList<>();
+        originals.put(inv.indexNKey(), indexBytes);
+
+        for (SnapshotEntry entry : selected.values()) {
+            ObjectNode manifestEntry = manifestEntries.get(entry.uuid());
+            if (manifestEntry == null) throw new IOException("snapshot is not in the manifest: " + entry.uuid());
+            byte[] raw = store.get(entry.snapDatKey());
+            originals.put(entry.snapDatKey(), raw);
+            MetadataCodec.Decoded decoded = MetadataCodec.decode(raw, SnapshotRepo.CODEC_SNAPSHOT);
+            if (decoded.version() != 1) {
+                throw new IOException("unsupported snapshot codec version: " + decoded.version());
+            }
+            JsonNode tree = SmileJson.smileToTree(decoded.smileBytes());
+            if (tree == null || !(tree.path("snapshot") instanceof ObjectNode snapshot)) {
+                throw new IOException(entry.snapDatKey() + " is missing its snapshot object");
+            }
+            JsonNode versionId = snapshot.path("version_id");
+            if (!versionId.isIntegralNumber() || !versionId.canConvertToInt()) {
+                throw new IOException(entry.snapDatKey() + " needs a 32-bit integer version_id");
+            }
+            int oldId = versionId.intValue();
+            VersionCodec.Parsed oldVersion;
+            try {
+                oldVersion = VersionCodec.fromAnyId(oldId);
+            } catch (IllegalArgumentException e) {
+                throw new IOException("unsupported version_id in " + entry.snapDatKey(), e);
+            }
+            if (entry.versionIdFromSnapDat() == null || oldId != entry.versionIdFromSnapDat()) {
+                throw new IOException(entry.snapDatKey() + " changed or was unreadable at inventory time; reload before rewriting");
+            }
+            if (snapshot.has("uuid") && !entry.uuid().equals(snapshot.path("uuid").asText())) {
+                throw new IOException("snapshot UUID mismatch in " + entry.snapDatKey());
+            }
+            VersionCodec.Flavor flavor = VersionCodec.detectFlavor(oldId);
+            int newId = plan.targetVersion().toId(flavor);
+
+            if (manifestEntry.has("version")) {
+                JsonNode oldVersionNode = manifestEntry.get("version");
+                if (!oldVersionNode.isTextual() || !oldVersion.asString().equals(oldVersionNode.asText())) {
+                    throw new IOException("manifest and snapshot version disagree for " + entry.uuid());
+                }
+                if (!plan.targetVersion().asString().equals(oldVersionNode.asText())) {
+                    manifestEntry.put("version", plan.targetVersion().asString());
+                    manifestChanges.add(String.format("[%s] snapshots[uuid=%s].version: %s -> %s",
+                            inv.indexNKey(), entry.uuid(), oldVersionNode.asText(), plan.targetVersion().asString()));
+                }
+            }
+            if (manifestEntry.has("version_id")) {
+                JsonNode oldManifestId = manifestEntry.get("version_id");
+                if (!oldManifestId.isIntegralNumber() || !oldManifestId.canConvertToInt()
+                        || oldManifestId.intValue() != oldId) {
+                    throw new IOException("manifest and snapshot version_id disagree for " + entry.uuid());
+                }
+                if (oldId != newId) {
+                    manifestEntry.put("version_id", newId);
+                    manifestChanges.add(String.format("[%s] snapshots[uuid=%s].version_id: %d -> %d",
+                            inv.indexNKey(), entry.uuid(), oldId, newId));
+                }
+            }
+            if (oldId != newId) {
+                snapshot.put("version_id", newId);
+                byte[] reframed = MetadataCodec.encode(SmileJson.treeToSmile(tree), decoded);
+                replacements.put(entry.snapDatKey(), reframed);
+                blobChanges.add(String.format("[%s] snapshot.version_id: %d -> %d (%s -> %s)",
+                        entry.snapDatKey(), oldId, newId, safeFormat(oldId), plan.targetVersion().asString()));
+            }
+        }
+        // The manifest is written last, only after every selected blob validates.
+        // A no-op preserves the original bytes, including JSON formatting.
+        if (!manifestChanges.isEmpty()) replacements.put(inv.indexNKey(), jsonBytesPretty(indexN));
+        List<String> changes = new ArrayList<>(manifestChanges);
+        changes.addAll(blobChanges);
+        return new PreparedRewrite(originals, replacements, List.copyOf(changes));
     }
 
     private static String safeFormat(int id) {

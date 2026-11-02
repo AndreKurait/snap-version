@@ -4,196 +4,150 @@
 [![Release](https://img.shields.io/github/v/release/AndreKurait/snap-version?include_prereleases&sort=semver)](https://github.com/AndreKurait/snap-version/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Edit the recorded version inside an OpenSearch / Elasticsearch S3 snapshot
-so a lower-version cluster can restore it.**
+**Inspect and edit recorded version metadata in OpenSearch and Elasticsearch snapshot repositories.**
 
-OpenSearch and Elasticsearch refuse to restore a snapshot taken on a
-higher version (`"the snapshot was created with OpenSearch version [2.19.4]
-which is higher than the version of this node [2.19.0]"`). `snap-version`
-reads the snapshot's metadata blobs (Smile + Lucene CodecUtil framing,
-optional DEFLATE compression, CRC32 footer), rewrites the version fields,
-and writes the bytes back so the target cluster accepts them.
+`snap-version` is a recovery and format-investigation tool. It reads snapshot
+metadata as JSON or Smile with Lucene CodecUtil framing, preserves compression,
+and recomputes the CRC32 footer when re-encoding a blob.
 
-![demo](demo/demo.gif)
+Changing a recorded version can bypass a version check. It does **not** convert
+Lucene segments, mappings, plugins, or other index data, and it does not establish
+that a snapshot can be safely restored on an older cluster.
 
-## Why does this exist?
+## Before rewriting
 
-OpenSearch / Elasticsearch repository metadata records the snapshot's source
-version in two places:
+Work on a complete, **offline copy** of the repository and retain an untouched
+backup. Stop all writers to the copy; do not edit a repository registered to an
+active cluster. Keep the original metadata and shard data together so you can
+restore the whole copy after an interrupted operation.
 
-| File | Field | Format |
-|---|---|---|
-| `index-N` (plain JSON manifest) | `snapshots[].version` | string `"2.19.4"` |
-| `snap-<uuid>.dat` (Smile + codec) | `snapshot.version_id` | XOR-encoded int |
+The high-level `version` command validates every selected metadata blob before
+writing, checks for stale inventory, writes snapshot blobs first, and writes the
+manifest last. Individual local writes use atomic rename. **The whole rewrite is
+not a transaction across files or S3 objects.** A write failure or concurrent
+writer can still leave a partially changed repository. The tool does not create
+automatic backups or perform automatic rollback.
 
-If the target cluster has an older version, both checks fail and the restore
-is rejected. `snap-version` decodes the Smile-encoded blob through the same
-Lucene `CodecUtil` frame that ES/OS use, rewrites the integer, recomputes the
-CRC32 footer, and uploads the corrected bytes — so the target cluster sees a
-snapshot that thinks it was taken on its own version.
+The lower-level `push`, `edit`, and TUI commands write individual blobs directly;
+they do not perform the high-level repository preflight.
 
 ## Install
 
-The simplest way — works on macOS, Linux, and Windows. The Gradle wrapper
-auto-provisions a JDK if you don't already have Java 21 installed.
+Build a JVM distribution with Java 21 and the Gradle wrapper:
 
-```bash
+```sh
 git clone https://github.com/AndreKurait/snap-version
 cd snap-version
 ./gradlew installDist
-
-# Run it
 build/install/snap-version/bin/snap-version --help
 ```
 
-No signed binaries needed, no Gatekeeper warnings on macOS, no admin rights.
+A Java installation is needed to launch Gradle. The build can provision its
+configured Java 21 daemon/toolchain when necessary. Windows users can use
+`gradlew.bat` and the generated `.bat` launcher.
 
-If you'd rather download a prebuilt artifact instead of cloning, the
-[Releases page](https://github.com/AndreKurait/snap-version/releases/latest)
-has:
+The [releases page](https://github.com/AndreKurait/snap-version/releases) also
+provides platform-independent JVM distributions (`.tar` and `.zip`) and a fat JAR.
+They require Java 21 or later; they are not native executables.
 
-- A **JVM distribution** (`snap-version-<v>.tar` / `.zip`) — unpack and
-  run `bin/snap-version`. Requires Java 21+ on `$PATH`.
-- A **fat JAR** (`snap-version-<v>-all.jar`) — single file, run with
-  `java -jar snap-version.jar`.
+```sh
+java -jar snap-version-<version>-all.jar --help
+```
 
 ## Quick start
 
-```bash
-# Inventory: print every snapshot in the repo and its recorded version
-snap-version version --repo s3://my-bucket/snapshots --profile prod-readwrite --show
+Use an existing offline copy, and choose a snapshot name from the inventory:
 
-# Downgrade every snapshot to 2.19.0
-snap-version version --repo s3://my-bucket/snapshots --profile prod-readwrite --to 2.19.0 --yes
+```sh
+# Read-only inventory
+snap-version version --repo ./snapshot-copy --show
 
-# Or run interactively (no --to flag) — prints inventory, prompts for target + confirm
-snap-version version --repo s3://my-bucket/snapshots --profile prod-readwrite
+# Validate the selected rewrite and print changes without writing
+snap-version version --repo ./snapshot-copy --to 2.19.0 --snapshot nightly --dry-run
 
-# Local directory works too (e.g. an `aws s3 sync`'d copy)
-snap-version version --repo /var/snapshots/movies-repo --to 2.19.0 --yes
+# Apply to the disposable copy after keeping an untouched backup
+snap-version version --repo ./snapshot-copy --to 2.19.0 --snapshot nightly --yes
 ```
 
-`--profile` uses your `~/.aws/credentials` like the AWS CLI. For MinIO /
-LocalStack: add `--endpoint http://localhost:9000 --access-key X --secret-key Y --path-style`.
+Repeat `--snapshot NAME` to select more than one snapshot. Unknown names are an
+error; omitting `--snapshot` selects every snapshot. Without `--yes`, the command
+asks for confirmation. `--dry-run` requires an explicit `--to` and never writes.
 
-## Subcommands
+S3 inventory uses the same interface:
 
-| Command | What it does |
-|---|---|
-| `version` | Inventory + rewrite snapshot versions in one command. **The main entry point.** |
-| `tui` | Interactive two-pane terminal UI (browse blobs, edit JSON, Ctrl-S to save). |
-| `ls` | Print snapshots and indices from the repo manifest. |
-| `cat` | Decode a metadata blob (Smile + codec frame) and print as JSON. |
-| `pull` / `push` | Download a blob to a local JSON file / re-encode and upload it. |
-| `edit` | Pull → open in `$EDITOR` → re-encode and upload. |
-| `decode-file` / `encode-file` | Offline blob-on-disk decode/encode (no S3 needed). |
-
-Run `snap-version <command> --help` for full options.
-
-## How it works
-
-```
-                                                      writes back
-                ┌───────────────────────┐    Smile + codec frame    ┌──────────────────┐
-                │  S3 / MinIO / LocalFS │ ◄──────────────────────── │  snap-version    │
-                │                       │                           │  + new CRC32     │
-                │  index-N (JSON)       │ ────────────────────────► │                  │
-                │  snap-<uuid>.dat      │   reads + decodes Smile   │  rewrites the    │
-                │  (Smile + codec)      │                           │  version fields  │
-                └───────────────────────┘                           └──────────────────┘
+```sh
+snap-version version --repo s3://my-bucket/snapshot-copy --profile snapshot-readonly --show
 ```
 
-Concretely, `version --to <NEW>` does:
+For an isolated MinIO or other S3-compatible test endpoint, use `--endpoint`,
+`--access-key`, `--secret-key`, and `--path-style`. Prefer credential profiles or
+the default credential chain for AWS; do not put real secrets in shell history.
 
-1. Read `index.latest` → generation N.
-2. Parse `index-N` (plain JSON).
-3. For every snapshot, fetch and decode `snap-<uuid>.dat` (strip Lucene
-   CodecUtil header → optionally inflate `DFL\0`+raw-DEFLATE → parse Smile)
-   to read `version_id`.
-4. Rewrite `snapshots[*].version` (and `version_id` if present) in `index-N`,
-   upload.
-5. For each selected snapshot, decode the Smile body, set
-   `snapshot.version_id = (major*1_000_000 + minor*10_000 + revision*100 + 99) ^ 0x08000000`,
-   re-encode Smile, re-wrap with codec header, recompute CRC32, upload.
+## What changes
 
-Shard-data files (`__*` blobs), shard-level snap files, index metadata, and
-data are not touched.
+| Object | Version fields |
+| --- | --- |
+| `index-N` JSON manifest | Selected snapshots' `version` and `version_id`, when present |
+| Root-level `snap-<uuid>.dat` | `snapshot.version_id` inside the framed Smile body |
 
-## Multi-snapshot / incremental repos
+The rewriter detects OpenSearch's XOR-masked IDs or legacy Elasticsearch's
+unmasked release IDs and preserves that flavor. It rejects unreadable, missing,
+unsupported, or inconsistent selected metadata before the first write. An
+already matching target produces no writes, preserving the original bytes.
 
-A single repository commonly holds many snapshots of the same indices, where
-each snapshot only stores the new shard data on top of the prior one
-(via `shard_generations`). `snap-version` rewrites versions correctly across
-all of them in one pass:
+Shard data, per-shard snapshot files, index metadata, `index.latest`, and
+unselected snapshots are not rewritten. Preserving those objects does not prove
+that an older engine understands their contents.
 
-- **Every snapshot** in `index-N` gets its `version` string updated.
-- **Every** matching `snap-<uuid>.dat` blob has its `version_id` rewritten
-  through the Smile + codec frame.
-- **Shard data files** (`indices/<id>/<shard>/__*` and per-shard
-  `snap-<uuid>.dat`) are not touched, so the increment chain stays intact.
+Local repository keys must stay below the repository root. Symlinked keys and
+symlinked child directories are rejected. This is not an isolation boundary
+against another process replacing directories during an operation; use an offline
+copy with no concurrent writers.
 
-This is verified end-to-end by `IncrementalSnapshotDowngradeE2ETest`: 3
-sequential snapshots on 2.19.4 (3 / 6 / 9 docs), all rejected on 2.19.0,
-one `snap-version version --to 2.19.0` rewrite, then each snapshot restores
-independently on 2.19.0 with the correct doc count and the shared shard
-blobs unchanged. Restrict to a subset with `--snapshot <name>` (repeatable)
-if you only want some of them downgraded.
+## Commands
 
-## Tests
+| Command | Purpose |
+| --- | --- |
+| `version` | Inventory, validate, preview, and rewrite version metadata |
+| `ls` | List snapshots and indices from the manifest |
+| `cat` | Decode a metadata blob to JSON |
+| `pull` / `push` | Download JSON plus a framing sidecar, or encode and write it back |
+| `edit` | Edit a single blob with an external editor |
+| `tui` | Browse and edit metadata interactively |
+| `decode-file` / `encode-file` | Work on individual local files without S3 |
 
-```bash
-./gradlew test                # unit + CLI tests, no Docker needed (~10s)
-./gradlew e2eTest             # OpenSearch e2e: real clusters via testcontainers (~30s warm)
-./gradlew e2eTestElasticsearch # legacy Elasticsearch (gated separately — ES 7.x is finicky on some Docker hosts)
+## Tests and compatibility
+
+```sh
+./gradlew test                  # Local unit and CLI tests; no AWS or Docker required
+./gradlew e2eTest               # Real OpenSearch + MinIO containers; requires Docker
+./gradlew e2eTestElasticsearch   # Separate legacy Elasticsearch container fixture
 ```
 
-The e2e suite (`SnapshotDowngradeE2ETest`) spins up OpenSearch 2.19.4 (source)
-and 2.19.0 (target) on a docker network with MinIO as S3, asserts the target
-**rejects** the unmodified snapshot (HTTP 500), runs `VersionRewriter`, then
-asserts the target **accepts** the rewritten snapshot (HTTP 200) and queries
-return all the original documents.
+Unit tests cover framing and CRC checks, version-ID encoding, local path
+containment, paginated S3 listings using a fake client, rewrite preflight,
+selection, no-op behavior, dry runs, and simulated write failures. Synthetic
+metadata tests are not evidence of engine restore compatibility.
 
-| Suite | Tests | Highlights |
-|---|---|---|
-| `MetadataCodecTest` | 5 | Codec frame round-trip, DFL\0 detection, bad-CRC + bad-codec rejection |
-| `SmileJsonTest` | 1 | Smile↔JSON with the ES-matching factory |
-| `VersionCodecTest` | 8 | `version_id` encoding for known OS + ES versions; flavor auto-detection via mask bit |
-| `LocalStoreTest` | 4 | Local filesystem store: round-trip + path-traversal blocked |
-| `VersionRewriterTest` | 4 | Rewrite all / selected / no-op idempotency |
-| `CliE2ETest` | 7 | **Drives the actual CLI in-process — read this for usage examples.** |
-| `SnapshotDowngradeE2ETest` (e2e) | 1 | Single snapshot: 2.19.4 → (rejected) → rewrite → (accepted) on 2.19.0 |
-| `IncrementalSnapshotDowngradeE2ETest` (e2e) | 1 | **Three sequential snapshots in one repo, all downgraded in one rewriter call — each restores independently with the right doc counts (3 / 6 / 9), and the shared shard data blobs are untouched.** |
-| `DockerClientProbeTest` (e2e) | 1 | Sanity: testcontainers can find the docker daemon |
+The repository contains container fixtures for:
 
-## Recording the demo
+- OpenSearch **2.19.4 → 2.19.0**, including single and incremental snapshots.
+- Elasticsearch **7.17.28 → 7.17.0**, in a separately gated suite.
 
-If you want to re-record the GIF at the top of this README:
+A passing fixture supports only that version pair, data, and configuration.
+It does not establish general support for all OpenSearch 2.x snapshots, other
+Elasticsearch generations, cross-major restores, production data, or arbitrary
+downgrades. Validate restored document contents, mappings, queries, and other
+application requirements on a disposable target cluster before relying on results.
 
-```bash
-brew install asciinema agg          # one-time
-docker compose -f docker/docker-compose.yml up -d --wait
-./gradlew installDist
-./demo/record.sh                    # writes demo/demo.cast and demo/demo.gif
-```
+## Contributing and releases
 
-## Compatibility
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and the release process.
+Report a bug with the command, engine versions, and a minimal synthetic
+reproduction; remove credentials and private snapshot contents.
 
-Tested against OpenSearch 2.x snapshots (post-shard-generations layout).
-ES 1.x / 2.x / 5.x / 6.x metadata is also Smile-encoded but with slightly
-different `index-N` shapes — the codec layer here will read those, but the
-high-level `version` command's expectations may need tweaks. PRs welcome.
+![Demo of the original workflow](demo/demo.gif)
 
-Snapshot blobs that pre-date version-id-as-XOR (legacy Elasticsearch) are
-auto-detected by the absence of the `0x08000000` mask bit; `version --show`
-will display them but `--to <version>` writes the OpenSearch encoding by
-default.
+The demo illustrates a specific recovery experiment, not a compatibility guarantee.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: small, focused PRs;
-add a test in `CliE2ETest` if you change CLI behavior; run `./gradlew test e2eTest e2eTestElasticsearch`
-locally before pushing.
-
-## License
-
-[Apache-2.0](LICENSE)
+Licensed under [Apache-2.0](LICENSE).

@@ -18,7 +18,22 @@ jobs:
     name: Build distribution + publish release
     runs-on: ubuntu-latest
     steps:
+      - name: Validate release tag
+        id: vars
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a version tag such as v0.1.0 or v0.1.0-rc.1" >&2
+            exit 1
+          fi
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${REQUESTED_TAG#v}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.vars.outputs.tag }}
+          persist-credentials: false
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -34,19 +49,19 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-release-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
 
-      - id: vars
+      - name: Test and build the tagged distribution
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: ./gradlew --no-daemon test installDist distZip distTar fatJar "-Pversion=$VERSION"
+
+      - name: Smoke-test packaged launchers
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
         run: |
-          TAG="${GITHUB_REF##refs/tags/}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - run: ./gradlew --no-daemon test
-
-      - run: ./gradlew --no-daemon distZip distTar fatJar -Pversion=${{ steps.vars.outputs.version }}
+          build/install/snap-version/bin/snap-version --help
+          java -jar "build/libs/snap-version-$VERSION-all.jar" --help
+          test "$(build/install/snap-version/bin/snap-version --version)" = "snap-version $VERSION"
+          test "$(java -jar "build/libs/snap-version-$VERSION-all.jar" --version)" = "snap-version $VERSION"
 
       - name: Stage distributables
         run: |
@@ -55,7 +70,7 @@ jobs:
           cp build/distributions/snap-version-*.tar dist/
           cp build/libs/snap-version-*-all.jar dist/
           cd dist
-          sha256sum * > SHA256SUMS.txt
+          sha256sum ./* > SHA256SUMS.txt
           ls -la
 
       - name: Create GitHub Release
@@ -74,18 +89,20 @@ jobs:
             ```bash
             git clone https://github.com/AndreKurait/snap-version
             cd snap-version
+            git checkout ${{ steps.vars.outputs.tag }}
             ./gradlew installDist
             build/install/snap-version/bin/snap-version --help
             ```
 
-            The Gradle wrapper auto-provisions Java 21 if needed (no admin
-            rights required). No Gatekeeper / unsigned-binary issues.
+            A Java installation is needed to launch Gradle. The build can
+            provision its configured Java 21 daemon/toolchain when necessary.
+            Windows users can use `gradlew.bat` and the generated `.bat` launcher.
 
             ### Or: download a prebuilt JVM distribution
 
             ```bash
-            curl -L -o snap-version.tar https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/snap-version-${{ steps.vars.outputs.version }}.tar
-            tar -xf snap-version.tar
+            curl -fLO https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/snap-version-${{ steps.vars.outputs.version }}.tar
+            tar -xf snap-version-${{ steps.vars.outputs.version }}.tar
             ./snap-version-${{ steps.vars.outputs.version }}/bin/snap-version --help
             ```
 
@@ -94,13 +111,18 @@ jobs:
             ### Or: single fat JAR
 
             ```bash
-            curl -L -o snap-version.jar https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/snap-version-${{ steps.vars.outputs.version }}-all.jar
-            java -jar snap-version.jar --help
+            curl -fLO https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/snap-version-${{ steps.vars.outputs.version }}-all.jar
+            java -jar snap-version-${{ steps.vars.outputs.version }}-all.jar --help
             ```
 
             ### Verify checksums
 
             ```bash
-            curl -L -O https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/SHA256SUMS.txt
-            sha256sum -c SHA256SUMS.txt
+            curl -fLO https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}/SHA256SUMS.txt
+            sha256sum --ignore-missing -c SHA256SUMS.txt
             ```
+
+            Verify the files you downloaded before running them. These are JVM
+            artifacts requiring Java 21+, not native executables. Metadata
+            rewriting does not establish downgrade compatibility; read the
+            README and work only on an offline copy with an untouched backup.

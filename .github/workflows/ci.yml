@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -37,8 +38,13 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Run unit tests
-        run: ./gradlew --no-daemon test
+      - name: Run unit tests and build JVM packages
+        run: ./gradlew --no-daemon test installDist fatJar
+
+      - name: Smoke-test packaged launchers
+        run: |
+          build/install/snap-version/bin/snap-version --help
+          java -jar build/libs/snap-version-*-all.jar --help
 
       - name: Upload test reports on failure
         if: failure()

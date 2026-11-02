@@ -21,8 +21,10 @@ build/install/snap-version/bin/snap-version --help
 
 The e2e suite (`./gradlew e2eTest`) spins up two OpenSearch versions + MinIO via
 Testcontainers and exercises the whole "fail → rewrite → success" arc. It needs
-a working Docker daemon (Docker Desktop, Rancher Desktop, Colima, podman with
-docker-compat all work). Testcontainers 1.21.4+ is required for Docker 29.x.
+a Docker environment supported by the pinned Testcontainers version. Unit tests
+must not contact AWS or use real repository credentials. Report the environment
+and exact engine pair when sharing an e2e result; do not generalize one fixture's
+success to arbitrary downgrade compatibility.
 
 ## Submitting a change
 
@@ -42,13 +44,17 @@ verify the value against a real cluster's `version_id` in `snap-*.dat`.
 ## Releasing (maintainers)
 
 Tag a release: `git tag v0.X.Y && git push origin v0.X.Y`. The Release workflow
-will build the cross-platform distributions (Linux x64/arm64, macOS arm64/x64,
-Windows x64) and attach them to the GitHub Release.
+checks out that tag, runs unit tests, and builds platform-independent JVM `.tar`
+and `.zip` distributions plus a fat JAR. These artifacts need Java 21 or later;
+they are not separate native binaries for each OS/architecture.
 
 ## Code style
 
 - Java 21, 4-space indent, 120-char lines.
-- `./gradlew check` runs all linters/tests we care about.
+- `./gradlew check` runs the default verification tasks; Docker e2e tasks are separate.
+- For rewrite changes, prove that malformed input causes no writes and document
+  any remaining partial-write boundary. Work only with synthetic/offline copies.
+- For release changes, smoke-test both the installed launcher and the fat JAR.
 - Tests double as documentation: a new feature should add a test in
   `CliE2ETest` (drives the actual command in-process) so future contributors
   can read it as a usage example.

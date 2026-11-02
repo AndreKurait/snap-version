@@ -83,5 +83,7 @@ class VersionCodecTest {
         assertThatThrownBy(() -> VersionCodec.parse("2.19")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> VersionCodec.parse(null)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> VersionCodec.parse("100.0.0")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> VersionCodec.parse("0.0.0")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new VersionCodec.Parsed(2, 100, 0)).isInstanceOf(IllegalArgumentException.class);
     }
 }

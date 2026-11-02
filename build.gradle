@@ -77,6 +77,13 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ['-Xlint:all', '-Xlint:-processing']
 }
 
+tasks.named('processResources') {
+    inputs.property('appVersion', project.version)
+    filesMatching('snap-version.properties') {
+        expand(version: project.version)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fat ("shadow") JAR — a single self-contained JAR users can run with `java -jar`.
 // ---------------------------------------------------------------------------

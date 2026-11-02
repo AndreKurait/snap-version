@@ -40,7 +40,7 @@ public class S3Store implements SnapshotStore {
     private final String bucket;
     private final String prefix; // never starts with "/", always ends with "/" (or empty)
 
-    private S3Store(S3Client s3, String bucket, String prefix) {
+    S3Store(S3Client s3, String bucket, String prefix) {
         this.s3 = s3;
         this.bucket = bucket;
         this.prefix = prefix;
@@ -133,17 +133,24 @@ public class S3Store implements SnapshotStore {
     public List<String> listFilesAtLevel(String subPrefix) {
         List<String> out = new ArrayList<>();
         String full = prefix + (subPrefix == null ? "" : subPrefix);
-        var req = ListObjectsV2Request.builder()
-                .bucket(bucket)
-                .prefix(full)
-                .delimiter("/")
-                .build();
-        ListObjectsV2Response resp = s3.listObjectsV2(req);
-        for (S3Object o : resp.contents()) {
-            String k = o.key();
-            String name = k.substring(full.length());
-            if (!name.contains("/") && !name.isEmpty()) out.add(name);
-        }
+        if (!full.isEmpty() && !full.endsWith("/")) full += "/";
+        String continuation = null;
+        do {
+            var req = ListObjectsV2Request.builder()
+                    .bucket(bucket)
+                    .prefix(full)
+                    .delimiter("/")
+                    .continuationToken(continuation)
+                    .build();
+            ListObjectsV2Response resp = s3.listObjectsV2(req);
+            for (S3Object o : resp.contents()) {
+                String k = o.key();
+                if (!k.startsWith(full)) continue;
+                String name = k.substring(full.length());
+                if (!name.contains("/") && !name.isEmpty()) out.add(name);
+            }
+            continuation = Boolean.TRUE.equals(resp.isTruncated()) ? resp.nextContinuationToken() : null;
+        } while (continuation != null);
         return out;
     }
 

@@ -17,11 +17,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.stream.Collectors;
 
 @Command(name = "version",
         description = "Inspect every snapshot's recorded version, and (optionally) rewrite the " +
-                "version metadata in place to make snapshots restorable on a lower-version cluster.")
+                "version metadata in an offline repository copy. Does not establish restore compatibility.")
 public class VersionCommand implements Callable<Integer> {
 
     @Mixin S3Options s3opts = new S3Options();
@@ -33,7 +32,7 @@ public class VersionCommand implements Callable<Integer> {
     @Option(names = "--snapshot",
             description = "Restrict rewrite to this snapshot name (repeatable). " +
                     "If omitted: 'all' in interactive mode, or all in --yes mode.",
-            arity = "0..*")
+            arity = "1..*")
     List<String> snapshots = new ArrayList<>();
 
     @Option(names = "--yes", defaultValue = "false",
@@ -44,8 +43,13 @@ public class VersionCommand implements Callable<Integer> {
             description = "Print the inventory and exit (no edits).")
     boolean show;
 
+    @Option(names = "--dry-run", defaultValue = "false",
+            description = "Validate and preview the rewrite without writing. Requires --to.")
+    boolean dryRun;
+
     @Override
     public Integer call() throws Exception {
+        if (dryRun && to == null) throw new IllegalArgumentException("--dry-run requires --to");
         try (SnapshotStore store = StoreOpener.open(s3opts.repo, s3opts.region, s3opts.endpoint,
                 s3opts.accessKey, s3opts.secretKey, s3opts.pathStyle, s3opts.profile)) {
 
@@ -99,6 +103,16 @@ public class VersionCommand implements Callable<Integer> {
                         e.snapDatKey() != null ? e.snapDatKey() : "(missing)");
             }
             System.out.println();
+            System.out.println("This edits version metadata only; it does not convert index data or prove restore compatibility.");
+            System.out.println("Use an offline repository copy with an untouched backup; writes are not transactional.");
+
+            List<String> preview = rewriter.preview(inv, plan);
+            if (dryRun) {
+                System.out.println("Dry run — no objects written:");
+                preview.forEach(change -> System.out.println("  " + change));
+                if (preview.isEmpty()) System.out.println("  (none — already at the target version)");
+                return 0;
+            }
 
             if (!yes) {
                 String c = prompt("Apply? [y/N] > ");
@@ -118,7 +132,7 @@ public class VersionCommand implements Callable<Integer> {
                 changes.forEach(c -> System.out.println("  " + c));
             }
             System.out.println();
-            System.out.println("Done. Re-register the snapshot repo on the destination cluster, then restore.");
+            System.out.println("Metadata rewrite complete. Validate restore and data integrity on a disposable target cluster.");
             return 0;
         }
     }
@@ -127,9 +141,7 @@ public class VersionCommand implements Callable<Integer> {
 
     private List<VersionRewriter.SnapshotEntry> selectSnapshots(VersionRewriter.Inventory inv) throws IOException {
         if (!snapshots.isEmpty()) {
-            return inv.snapshots().stream()
-                    .filter(e -> snapshots.contains(e.name()))
-                    .toList();
+            return selectRequested(inv, snapshots);
         }
         if (yes || to != null) {
             // Non-interactive default: all
@@ -142,9 +154,15 @@ public class VersionCommand implements Callable<Integer> {
         }
         List<String> wanted = Arrays.stream(input.split(","))
                 .map(String::trim).filter(s -> !s.isEmpty()).toList();
-        return inv.snapshots().stream()
-                .filter(e -> wanted.contains(e.name()))
-                .toList();
+        return selectRequested(inv, wanted);
+    }
+
+    private static List<VersionRewriter.SnapshotEntry> selectRequested(
+            VersionRewriter.Inventory inv, List<String> wanted) throws IOException {
+        List<String> known = inv.snapshots().stream().map(VersionRewriter.SnapshotEntry::name).toList();
+        List<String> unknown = wanted.stream().filter(name -> !known.contains(name)).toList();
+        if (!unknown.isEmpty()) throw new IOException("unknown snapshot names: " + unknown);
+        return inv.snapshots().stream().filter(entry -> wanted.contains(entry.name())).toList();
     }
 
     private static String suggestMin(VersionRewriter.Inventory inv) {

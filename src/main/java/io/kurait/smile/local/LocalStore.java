@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,8 +18,9 @@ import java.util.stream.Stream;
  * <p>The directory is treated as the repo root: keys like {@code "index-0"} or
  * {@code "indices/&lt;uuid&gt;/meta-&lt;id&gt;.dat"} resolve to files relative to it.
  *
- * <p>{@link #put} writes via a temp-file-and-atomic-rename so a crash mid-write
- * doesn't corrupt the on-disk snapshot.
+ * <p>{@link #put} stages each file beside its destination and replaces it with
+ * an atomic rename. This does not make a multi-file rewrite transactional or
+ * guarantee durability across a power failure.
  */
 public class LocalStore implements SnapshotStore {
 
@@ -30,7 +32,11 @@ public class LocalStore implements SnapshotStore {
         if (!Files.isDirectory(root)) {
             throw new IllegalArgumentException("not a directory: " + root);
         }
-        this.root = root.toAbsolutePath().normalize();
+        try {
+            this.root = root.toRealPath();
+        } catch (IOException e) {
+            throw new IllegalArgumentException("cannot resolve repository directory: " + root, e);
+        }
         log.info("Opened LocalStore: root={}", this.root);
     }
 
@@ -47,15 +53,25 @@ public class LocalStore implements SnapshotStore {
     @Override
     public void put(String relativeKey, byte[] body) {
         Path p = resolveSafe(relativeKey);
+        Path tmp = null;
         try {
             Files.createDirectories(p.getParent());
-            Path tmp = Files.createTempFile(p.getParent(), p.getFileName().toString() + ".", ".tmp");
+            tmp = Files.createTempFile(p.getParent(), p.getFileName().toString() + ".", ".tmp");
             Files.write(tmp, body);
             Files.move(tmp, p, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                     java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            tmp = null;
             log.info("PUT {} ({} bytes)", p, body.length);
         } catch (IOException e) {
             throw new RuntimeException("failed to write " + p, e);
+        } finally {
+            if (tmp != null) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException e) {
+                    log.warn("Could not remove temporary file {}: {}", tmp, e.toString());
+                }
+            }
         }
     }
 
@@ -65,7 +81,7 @@ public class LocalStore implements SnapshotStore {
         if (!Files.exists(base)) return List.of();
         List<String> out = new ArrayList<>();
         try (Stream<Path> walk = Files.walk(base)) {
-            walk.filter(Files::isRegularFile).forEach(p -> {
+            walk.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)).forEach(p -> {
                 Path rel = root.relativize(p);
                 out.add(rel.toString().replace(java.io.File.separatorChar, '/'));
             });
@@ -81,7 +97,8 @@ public class LocalStore implements SnapshotStore {
         if (!Files.isDirectory(base)) return List.of();
         List<String> out = new ArrayList<>();
         try (Stream<Path> stream = Files.list(base)) {
-            stream.filter(Files::isRegularFile).forEach(p -> out.add(p.getFileName().toString()));
+            stream.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS))
+                    .forEach(p -> out.add(p.getFileName().toString()));
         } catch (IOException e) {
             throw new RuntimeException("failed to list " + base, e);
         }
@@ -97,12 +114,25 @@ public class LocalStore implements SnapshotStore {
     public void close() { /* no resources */ }
 
     private Path resolveSafe(String relativeKey) {
-        if (relativeKey.startsWith("/")) {
+        if (relativeKey == null || relativeKey.isBlank()) {
+            throw new IllegalArgumentException("a non-empty repository-relative key is required");
+        }
+        if (Path.of(relativeKey).isAbsolute()) {
             throw new IllegalArgumentException("absolute paths not allowed: " + relativeKey);
         }
         Path resolved = root.resolve(relativeKey).normalize();
         if (!resolved.startsWith(root)) {
             throw new IllegalArgumentException("path traversal blocked: " + relativeKey);
+        }
+        if (resolved.equals(root)) {
+            throw new IllegalArgumentException("key must name a file or subdirectory: " + relativeKey);
+        }
+        Path component = root;
+        for (Path part : root.relativize(resolved)) {
+            component = component.resolve(part);
+            if (Files.isSymbolicLink(component)) {
+                throw new IllegalArgumentException("symbolic links are not allowed in repository keys: " + relativeKey);
+            }
         }
         return resolved;
     }

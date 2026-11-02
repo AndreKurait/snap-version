@@ -20,7 +20,9 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,7 +42,7 @@ public class S3Store implements SnapshotStore {
     private final String bucket;
     private final String prefix; // never starts with "/", always ends with "/" (or empty)
 
-    private S3Store(S3Client s3, String bucket, String prefix) {
+    S3Store(S3Client s3, String bucket, String prefix) {
         this.s3 = s3;
         this.bucket = bucket;
         this.prefix = prefix;
@@ -112,6 +114,7 @@ public class S3Store implements SnapshotStore {
         List<String> out = new ArrayList<>();
         String full = prefix + (subPrefix == null ? "" : subPrefix);
         String continuation = null;
+        Set<String> seenTokens = new HashSet<>();
         do {
             var req = ListObjectsV2Request.builder()
                     .bucket(bucket)
@@ -124,7 +127,7 @@ public class S3Store implements SnapshotStore {
                 if (k.startsWith(prefix)) k = k.substring(prefix.length());
                 out.add(k);
             }
-            continuation = Boolean.TRUE.equals(resp.isTruncated()) ? resp.nextContinuationToken() : null;
+            continuation = nextContinuation(resp, seenTokens);
         } while (continuation != null);
         return out;
     }
@@ -133,18 +136,38 @@ public class S3Store implements SnapshotStore {
     public List<String> listFilesAtLevel(String subPrefix) {
         List<String> out = new ArrayList<>();
         String full = prefix + (subPrefix == null ? "" : subPrefix);
-        var req = ListObjectsV2Request.builder()
-                .bucket(bucket)
-                .prefix(full)
-                .delimiter("/")
-                .build();
-        ListObjectsV2Response resp = s3.listObjectsV2(req);
-        for (S3Object o : resp.contents()) {
-            String k = o.key();
-            String name = k.substring(full.length());
-            if (!name.contains("/") && !name.isEmpty()) out.add(name);
-        }
+        if (!full.isEmpty() && !full.endsWith("/")) full += "/";
+        String continuation = null;
+        Set<String> seenTokens = new HashSet<>();
+        do {
+            var req = ListObjectsV2Request.builder()
+                    .bucket(bucket)
+                    .prefix(full)
+                    .delimiter("/")
+                    .continuationToken(continuation)
+                    .build();
+            ListObjectsV2Response resp = s3.listObjectsV2(req);
+            for (S3Object o : resp.contents()) {
+                String k = o.key();
+                if (!k.startsWith(full)) continue;
+                String name = k.substring(full.length());
+                if (!name.contains("/") && !name.isEmpty()) out.add(name);
+            }
+            continuation = nextContinuation(resp, seenTokens);
+        } while (continuation != null);
         return out;
+    }
+
+    private static String nextContinuation(ListObjectsV2Response response, Set<String> seenTokens) {
+        if (!Boolean.TRUE.equals(response.isTruncated())) return null;
+        String next = response.nextContinuationToken();
+        if (next == null || next.isBlank()) {
+            throw new IllegalStateException("truncated S3 listing without a usable continuation token");
+        }
+        if (!seenTokens.add(next)) {
+            throw new IllegalStateException("S3 listing returned a repeated continuation token");
+        }
+        return next;
     }
 
     @Override

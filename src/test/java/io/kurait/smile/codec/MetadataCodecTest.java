@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 import java.util.zip.CheckedOutputStream;
@@ -15,6 +16,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class MetadataCodecTest {
+
+    @Test
+    void rejectsOversizedAndNegativeCodecLengthsBeforeAllocating() throws Exception {
+        for (int length : new int[]{Integer.MAX_VALUE, -1}) {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeInt(MetadataCodec.HEADER_MAGIC);
+            MetadataCodec.writeVInt(out, length);
+            out.write(new byte[20]);
+            assertThatThrownBy(() -> MetadataCodec.decode(bytes.toByteArray(), null))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("invalid codec-name length");
+        }
+    }
 
     @Test
     void roundTripUncompressed() throws Exception {

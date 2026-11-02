@@ -3,14 +3,20 @@ package io.kurait.smile.version;
 import io.kurait.smile.local.LocalStore;
 import io.kurait.smile.s3.SnapshotStore;
 import io.kurait.smile.testsupport.FakeRepo;
+import io.kurait.smile.codec.MetadataCodec;
+import io.kurait.smile.codec.SmileJson;
+import io.kurait.smile.repo.SnapshotRepo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.ArrayList;
+import java.io.IOException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end tests against a synthetic snapshot repo on disk. Each test mimics
@@ -18,6 +24,103 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and serves as runnable documentation for {@link VersionRewriter}.
  */
 class VersionRewriterTest {
+
+    @Test
+    void corruptLaterSnapshotDoesNotChangeManifestOrEarlierSnapshot(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        FakeRepo.appendSnapshot(tmp, "snap-B", "uuid-B", "2.19.4", 1);
+        byte[] beforeManifest = Files.readAllBytes(tmp.resolve("index-1"));
+        byte[] beforeFirst = Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"));
+        byte[] corrupt = Files.readAllBytes(tmp.resolve("snap-uuid-B.dat"));
+        corrupt[corrupt.length - 1] ^= 1;
+        Files.write(tmp.resolve("snap-uuid-B.dat"), corrupt);
+
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            assertThatThrownBy(() -> rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.19.0"), inventory.snapshots())))
+                    .isInstanceOf(IOException.class).hasMessageContaining("CRC32");
+            assertThat(store.writes).isEmpty();
+        }
+        assertThat(Files.readAllBytes(tmp.resolve("index-1"))).isEqualTo(beforeManifest);
+        assertThat(Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"))).isEqualTo(beforeFirst);
+    }
+
+    @Test
+    void missingSnapshotMetadataRejectsBeforeAnyWrite(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        Files.delete(tmp.resolve("snap-uuid-A.dat"));
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            assertThatThrownBy(() -> rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.19.0"), inventory.snapshots())))
+                    .isInstanceOf(IOException.class).hasMessageContaining("missing snapshot metadata");
+            assertThat(store.writes).isEmpty();
+        }
+    }
+
+    @Test
+    void invalidSnapshotShapeRejectsBeforeAnyWrite(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        Files.write(tmp.resolve("snap-uuid-A.dat"),
+                MetadataCodec.encode(SmileJson.jsonToSmile("{\"snapshot\":[]}"),
+                        SnapshotRepo.CODEC_SNAPSHOT, 1, false));
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            assertThatThrownBy(() -> rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.19.0"), inventory.snapshots())))
+                    .isInstanceOf(IOException.class).hasMessageContaining("missing its snapshot object");
+            assertThat(store.writes).isEmpty();
+        }
+    }
+
+    @Test
+    void staleInventoryCannotOverwriteChangedManifest(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.0");
+            assertThatThrownBy(() -> rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.15.0"), inventory.snapshots())))
+                    .isInstanceOf(IOException.class).hasMessageContaining("manifest changed");
+            assertThat(store.writes).isEmpty();
+        }
+    }
+
+    @Test
+    void noOpDoesNotWriteAnyObjects(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.0");
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            assertThat(rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.19.0"), inventory.snapshots()))).isEmpty();
+            assertThat(store.writes).isEmpty();
+        }
+    }
+
+    @Test
+    void failedBlobWriteLeavesManifestUnchangedAndReportsCompletedWrites(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        FakeRepo.appendSnapshot(tmp, "snap-B", "uuid-B", "2.19.4", 1);
+        byte[] before = Files.readAllBytes(tmp.resolve("index-1"));
+        try (RecordingStore store = new RecordingStore(new LocalStore(tmp))) {
+            store.failKey = "snap-uuid-B.dat";
+            VersionRewriter rewriter = new VersionRewriter(store);
+            var inventory = rewriter.inventory();
+            assertThatThrownBy(() -> rewriter.apply(inventory,
+                    rewriter.plan(VersionCodec.parse("2.19.0"), inventory.snapshots())))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("completed writes: [snap-uuid-A.dat]")
+                    .hasMessageContaining("backup");
+            assertThat(store.writes).containsExactly("snap-uuid-A.dat");
+        }
+        assertThat(Files.readAllBytes(tmp.resolve("index-1"))).isEqualTo(before);
+    }
 
     /** Inventory reads version from BOTH the index-N string and the smile-encoded version_id. */
     @Test
@@ -113,5 +216,23 @@ class VersionRewriterTest {
             byte[] snapDatAfter = Files.readAllBytes(tmp.resolve("snap-uuid-foo.dat"));
             assertThat(snapDatAfter).isEqualTo(snapDatBefore);
         }
+    }
+
+    private static class RecordingStore implements SnapshotStore {
+        private final SnapshotStore delegate;
+        private final List<String> writes = new ArrayList<>();
+        private String failKey;
+
+        RecordingStore(SnapshotStore delegate) { this.delegate = delegate; }
+        @Override public byte[] get(String key) { return delegate.get(key); }
+        @Override public void put(String key, byte[] bytes) {
+            if (key.equals(failKey)) throw new IllegalStateException("simulated write failure");
+            delegate.put(key, bytes);
+            writes.add(key);
+        }
+        @Override public List<String> list(String prefix) { return delegate.list(prefix); }
+        @Override public List<String> listFilesAtLevel(String prefix) { return delegate.listFilesAtLevel(prefix); }
+        @Override public String describe() { return delegate.describe(); }
+        @Override public void close() { delegate.close(); }
     }
 }

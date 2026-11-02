@@ -8,7 +8,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.zip.CRC32;
-import java.util.zip.CheckedInputStream;
 import java.util.zip.CheckedOutputStream;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
@@ -36,7 +35,7 @@ import java.util.zip.InflaterInputStream;
  *   | footer_magic = 0xC02893E8 (4 bytes)  |
  *   | int32 BE: 0                          |
  *   | int64 BE: crc32 of all bytes before  |
- *   |          the footer's first byte     |
+ *   |          the checksum field itself   |
  *   +--------------------------------------+
  * </pre>
  *
@@ -215,14 +214,14 @@ public final class MetadataCodec {
     }
 
     /**
-     * Reads the same UTF8 length-prefixed string format that
-     * {@code DataOutput.writeUTF / DataInput.readUTF} uses (Lucene's
-     * {@code DataOutput.writeString} writes a vInt length + UTF-8 bytes — but the
-     * <em>codec header</em> writer in CodecUtil uses {@code DataOutput.writeString}
-     * which itself writes a vInt length followed by raw UTF-8 bytes).
+     * Reads Lucene's vInt byte length followed by UTF-8 bytes. This differs from
+     * Java's DataInput.readUTF, which uses a fixed-width length and modified UTF-8.
      */
     static String readUtfString(DataInputStream in) throws IOException {
         int len = readVInt(in);
+        if (len < 0 || len > in.available()) {
+            throw new IOException("invalid codec-name length: " + len);
+        }
         byte[] buf = new byte[len];
         in.readFully(buf);
         return new String(buf, StandardCharsets.UTF_8);

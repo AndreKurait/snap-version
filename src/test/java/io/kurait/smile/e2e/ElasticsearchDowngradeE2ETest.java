@@ -77,7 +77,7 @@ class ElasticsearchDowngradeE2ETest {
     static void setUp() throws Exception {
         network = Network.newNetwork();
 
-        minio = new GenericContainer("minio/minio:RELEASE.2024-09-13T20-26-02Z")
+        minio = new GenericContainer(TestImages.MINIO)
                 .withNetwork(network)
                 .withNetworkAliases("minio")
                 .withExposedPorts(9000)

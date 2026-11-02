@@ -12,14 +12,18 @@ import io.kurait.smile.cli.VersionCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Properties;
+
 @Command(
     name = "snap-version",
     mixinStandardHelpOptions = true,
-    version = "snap-version 0.1.0",
+    versionProvider = Main.BuildVersion.class,
     description = "Inspect and edit Elasticsearch / OpenSearch snapshot repository " +
             "metadata (Smile + Lucene CodecUtil framing) on S3 or local disk \u2014 " +
-            "primarily for downgrading a snapshot's recorded version so a lower-version " +
-            "cluster can restore it.",
+            "for controlled recovery experiments on offline copies. Editing version " +
+            "metadata does not convert index data or establish restore compatibility.",
     subcommands = {
         TuiCommand.class,
         VersionCommand.class,
@@ -33,6 +37,19 @@ import picocli.CommandLine.Command;
     }
 )
 public class Main {
+    /** Read the version packaged by Gradle, including release -Pversion overrides. */
+    public static class BuildVersion implements CommandLine.IVersionProvider {
+        @Override
+        public String[] getVersion() throws IOException {
+            Properties properties = new Properties();
+            try (InputStream resource = Main.class.getResourceAsStream("/snap-version.properties")) {
+                if (resource == null) throw new IOException("missing packaged version resource");
+                properties.load(resource);
+            }
+            return new String[]{"snap-version " + properties.getProperty("version")};
+        }
+    }
+
     public static void main(String[] args) {
         int rc = new CommandLine(new Main()).execute(args);
         System.exit(rc);

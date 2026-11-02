@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.nio.file.Files;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -20,6 +21,58 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>If you want to know what args to pass and what output to expect, read these tests.
  */
 class CliE2ETest {
+
+    @Test
+    void dryRunValidatesWithoutWriting(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        byte[] manifest = Files.readAllBytes(tmp.resolve("index-0"));
+        byte[] metadata = Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"));
+
+        Captured cap = run("version", "--repo", tmp.toString(), "--to", "2.19.0", "--dry-run");
+
+        assertThat(cap.exitCode).isZero();
+        assertThat(cap.stdout).contains("Dry run").contains("2.19.4 -> 2.19.0");
+        assertThat(Files.readAllBytes(tmp.resolve("index-0"))).isEqualTo(manifest);
+        assertThat(Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"))).isEqualTo(metadata);
+    }
+
+    @Test
+    void unknownSnapshotNamesRejectTheWholeSelection(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        byte[] manifest = Files.readAllBytes(tmp.resolve("index-0"));
+        byte[] metadata = Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"));
+
+        Captured cap = run("version", "--repo", tmp.toString(), "--to", "2.19.0",
+                "--snapshot", "snap-A", "--snapshot", "typo", "--yes");
+
+        assertThat(cap.exitCode).isNotZero();
+        assertThat(cap.stderr).contains("unknown snapshot names").contains("typo");
+        assertThat(Files.readAllBytes(tmp.resolve("index-0"))).isEqualTo(manifest);
+        assertThat(Files.readAllBytes(tmp.resolve("snap-uuid-A.dat"))).isEqualTo(metadata);
+    }
+
+    @Test
+    void emptySnapshotOptionDoesNotSelectEverySnapshot(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        byte[] manifest = Files.readAllBytes(tmp.resolve("index-0"));
+
+        Captured cap = run("version", "--repo", tmp.toString(), "--to", "2.19.0", "--snapshot", "--yes");
+
+        assertThat(cap.exitCode).isNotZero();
+        assertThat(Files.readAllBytes(tmp.resolve("index-0"))).isEqualTo(manifest);
+    }
+
+    @Test
+    void snapshotOptionStillAcceptsMultipleNames(@TempDir Path tmp) throws Exception {
+        FakeRepo.build(tmp, "snap-A", "uuid-A", "2.19.4");
+        FakeRepo.appendSnapshot(tmp, "snap-B", "uuid-B", "2.19.4", 1);
+
+        Captured cap = run("version", "--repo", tmp.toString(), "--to", "2.19.0",
+                "--snapshot", "snap-A", "snap-B", "--dry-run");
+
+        assertThat(cap.exitCode).isZero();
+        assertThat(cap.stdout).contains("snap-uuid-A.dat").contains("snap-uuid-B.dat");
+    }
 
     /* ---------- usage example: just inventory the repo, no edits ---------- */
 

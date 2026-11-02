@@ -45,6 +45,11 @@ public final class VersionCodec {
 
     /** Parsed OS-style version. */
     public record Parsed(int major, int minor, int revision) {
+        public Parsed {
+            if (major < 1 || major > 99 || minor < 0 || minor > 99 || revision < 0 || revision > 99) {
+                throw new IllegalArgumentException("version components require major [1..99], minor/revision [0..99]");
+            }
+        }
         public String asString() {
             return major + "." + minor + "." + revision;
         }
@@ -69,9 +74,6 @@ public final class VersionCodec {
         int major = Integer.parseInt(m.group(1));
         int minor = Integer.parseInt(m.group(2));
         int revision = Integer.parseInt(m.group(3));
-        if (major < 0 || major > 99 || minor < 0 || minor > 99 || revision < 0 || revision > 99) {
-            throw new IllegalArgumentException("version components out of range [0..99]: " + s);
-        }
         return new Parsed(major, minor, revision);
     }
 

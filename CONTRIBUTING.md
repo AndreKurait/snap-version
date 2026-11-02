@@ -50,10 +50,28 @@ verify the value against a real cluster's `version_id` in `snap-*.dat`.
 
 ## Releasing (maintainers)
 
-Tag a release: `git tag v0.X.Y && git push origin v0.X.Y`. The Release workflow
-checks out that tag, runs unit tests, and builds platform-independent JVM `.tar`
-and `.zip` distributions plus a fat JAR. These artifacts need Java 21 or later;
-they are not separate native binaries for each OS/architecture.
+Update the default version in `build.gradle`, the changelog, and the README
+together. Run `./gradlew --no-daemon test installDist distZip distTar fatJar`,
+then check `--help` and `--version` using both the installed launcher and fat
+JAR. The versions must match the intended release.
+
+Merge the reviewed release preparation and wait for that commit's unit and
+OpenSearch end-to-end CI checks to pass. The separately gated Elasticsearch
+fixture does not run in normal CI; do not describe it as validated unless it
+was run for the stated versions and environment.
+
+When publication is authorized, create a new `vX.Y.Z` tag at the tested commit
+and push it. **Pushing the tag publishes artifacts automatically.** The Release
+workflow checks out that exact tag, reruns unit tests, and builds
+platform-independent JVM `.tar` and `.zip` distributions plus a fat JAR and
+checksums. These artifacts need Java 21 or later; they are not separate native
+binaries for each OS/architecture.
+
+The manual Release workflow requires an existing tag and also publishes; it is
+not a preview. Never move an existing version tag or rerun publication for an
+already published release. Verify the new assets and checksum file after
+publication, and include compatibility and offline-copy requirements in the
+release notes.
 
 ## Code style
 

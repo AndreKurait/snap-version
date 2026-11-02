@@ -15,6 +15,7 @@
 
 - Report the packaged version consistently from the installed launcher and fat JAR.
 - Build and smoke-test Java 21 JVM distributions and the fat JAR in CI and the tag-triggered release workflow.
+- Publish only after all four assets are uploaded and verified on a new draft; refuse existing releases/drafts or changed tags instead of replacing published assets.
 - Add synthetic rewrite, filesystem, pagination, and CLI regression coverage.
 - Restore a reproducible MinIO fixture for container tests. The OpenSearch suite covers the specific 2.19.4 → 2.19.0 pair, including incremental snapshots; the separate Elasticsearch 7.17.28 → 7.17.0 fixture is not part of normal CI.
 

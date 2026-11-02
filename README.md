@@ -33,6 +33,11 @@ they do not perform the high-level repository preflight.
 
 ## Install
 
+These instructions describe version **0.2.0**. Check the selected release's
+version and [changelog](CHANGELOG.md) before downloading: older release archives
+do not acquire the validation, pagination, or packaging fixes from the current
+source tree. Existing installations must be replaced or rebuilt to update.
+
 Build a JVM distribution with Java 21 and the Gradle wrapper:
 
 ```sh
@@ -40,6 +45,7 @@ git clone https://github.com/AndreKurait/snap-version
 cd snap-version
 ./gradlew installDist
 build/install/snap-version/bin/snap-version --help
+build/install/snap-version/bin/snap-version --version
 ```
 
 A Java installation is needed to launch Gradle. The build can provision its

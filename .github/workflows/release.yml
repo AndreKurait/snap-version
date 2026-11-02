@@ -7,11 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0)"
+        description: "Existing tag to publish (e.g. v0.2.0); this is not a preview"
         required: true
 
 permissions:
   contents: write
+
+concurrency:
+  group: snap-version-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -34,6 +38,13 @@ jobs:
         with:
           ref: refs/tags/${{ steps.vars.outputs.tag }}
           persist-credentials: false
+
+      - name: Record the tagged source commit
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Test release publication safeguards without network access
+        run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -64,87 +75,23 @@ jobs:
           test "$(java -jar "build/libs/snap-version-$VERSION-all.jar" --version)" = "snap-version $VERSION"
 
       - name: Stage distributables
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
         run: |
           mkdir -p dist
-          cp build/distributions/snap-version-*.zip dist/
-          cp build/distributions/snap-version-*.tar dist/
-          cp build/libs/snap-version-*-all.jar dist/
+          cp "build/distributions/snap-version-$VERSION.zip" dist/
+          cp "build/distributions/snap-version-$VERSION.tar" dist/
+          cp "build/libs/snap-version-$VERSION-all.jar" dist/
           cd dist
-          sha256sum ./* > SHA256SUMS.txt
+          sha256sum "snap-version-$VERSION.zip" "snap-version-$VERSION.tar" "snap-version-$VERSION-all.jar" > SHA256SUMS.txt
           ls -la
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.vars.outputs.tag }}
-          name: ${{ steps.vars.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            dist/*
-          body: |
-            ## Install
-
-            ### Recommended: clone + run via Gradle (works on macOS, Linux, Windows)
-
-            ```bash
-            (
-              set -e
-              git clone https://github.com/AndreKurait/snap-version
-              cd snap-version
-              git checkout ${{ steps.vars.outputs.tag }}
-              ./gradlew installDist "-Pversion=${{ steps.vars.outputs.version }}"
-              build/install/snap-version/bin/snap-version --help
-            )
-            ```
-
-            A Java installation is needed to launch Gradle. The build can
-            provision its configured Java 21 daemon/toolchain when necessary.
-            Windows users can use `gradlew.bat` and the generated `.bat` launcher.
-
-            ### Or: download a prebuilt JVM distribution
-
-            ```bash
-            (
-              set -eu
-              artifact="snap-version-${{ steps.vars.outputs.version }}.tar"
-              release="https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}"
-              curl -fLO "$release/$artifact"
-              curl -fLO "$release/SHA256SUMS.txt"
-              awk -v file="$artifact" '$2 == "./" file || $2 == file { if (NF != 2 || length($1) != 64 || $1 ~ /[^[:xdigit:]]/) exit 1; print $1 "  " file; found++ } END { if (found != 1) exit 1 }' SHA256SUMS.txt > "$artifact.sha256"
-              if command -v sha256sum >/dev/null 2>&1; then
-                sha256sum -c "$artifact.sha256"
-              else
-                shasum -a 256 -c "$artifact.sha256"
-              fi || exit 1
-              tar -xf "$artifact"
-              ./snap-version-${{ steps.vars.outputs.version }}/bin/snap-version --help
-            )
-            ```
-
-            Requires Java 21+ on `$PATH` (Temurin / Corretto / etc.).
-
-            ### Or: single fat JAR
-
-            ```bash
-            (
-              set -eu
-              artifact="snap-version-${{ steps.vars.outputs.version }}-all.jar"
-              release="https://github.com/AndreKurait/snap-version/releases/download/${{ steps.vars.outputs.tag }}"
-              curl -fLO "$release/$artifact"
-              curl -fLO "$release/SHA256SUMS.txt"
-              awk -v file="$artifact" '$2 == "./" file || $2 == file { if (NF != 2 || length($1) != 64 || $1 ~ /[^[:xdigit:]]/) exit 1; print $1 "  " file; found++ } END { if (found != 1) exit 1 }' SHA256SUMS.txt > "$artifact.sha256"
-              if command -v sha256sum >/dev/null 2>&1; then
-                sha256sum -c "$artifact.sha256"
-              else
-                shasum -a 256 -c "$artifact.sha256"
-              fi || exit 1
-              java -jar "$artifact" --help
-            )
-            ```
-
-            Each download example checks only the downloaded artifact's entry
-            and stops if the checksum is missing, duplicated, or incorrect.
-            Verification uses `sha256sum` when available and `shasum -a 256`
-            on macOS. These JVM artifacts require Java 21+. Metadata
-            rewriting does not establish downgrade compatibility; read the
-            README and work only on an offline copy with an untouched backup.
+      - name: Publish verified draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ steps.vars.outputs.tag }}
+          BUILT_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          python3 scripts/publish_release.py \
+            --repository "$GH_REPOSITORY" --tag "$TAG" --commit "$BUILT_COMMIT"

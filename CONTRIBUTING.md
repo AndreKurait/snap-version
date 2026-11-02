@@ -15,6 +15,7 @@ cd snap-version
 ./gradlew test                  # unit + CLI tests (~10s, no Docker needed)
 ./gradlew installDist           # build runnable distribution
 build/install/snap-version/bin/snap-version --help
+python3 -B -m unittest discover -s scripts -p 'test_*.py' # offline publisher tests
 ```
 
 ## End-to-end tests
@@ -50,10 +51,42 @@ verify the value against a real cluster's `version_id` in `snap-*.dat`.
 
 ## Releasing (maintainers)
 
-Tag a release: `git tag v0.X.Y && git push origin v0.X.Y`. The Release workflow
-checks out that tag, runs unit tests, and builds platform-independent JVM `.tar`
-and `.zip` distributions plus a fat JAR. These artifacts need Java 21 or later;
-they are not separate native binaries for each OS/architecture.
+Update the default version in `build.gradle`, the changelog, and the README
+together. Run `./gradlew --no-daemon test installDist distZip distTar fatJar`,
+then check `--help` and `--version` using both the installed launcher and fat
+JAR. The versions must match the intended release.
+
+Merge the reviewed release preparation and wait for that commit's unit and
+OpenSearch end-to-end CI checks to pass. The separately gated Elasticsearch
+fixture does not run in normal CI; do not describe it as validated unless it
+was run for the stated versions and environment.
+
+When publication is authorized, create a new `vX.Y.Z` tag at the tested commit
+and push it. **Pushing the tag publishes artifacts automatically.** The Release
+workflow checks out that exact tag, reruns unit tests, and builds
+platform-independent JVM `.tar` and `.zip` distributions plus a fat JAR and
+checksums. These artifacts need Java 21 or later; they are not separate native
+binaries for each OS/architecture.
+
+The publisher needs Python 3 and the authenticated GitHub CLI (both available on
+the hosted Ubuntu runner). It validates the four staged files and their
+checksums, refuses any existing release or draft for the tag, and checks that
+the remote tag still points to the built commit. It uploads to a newly created
+draft's numeric ID, verifies the uploaded names, sizes, and SHA-256 digests, then
+checks the tag again before making that draft public. Prereleases are not marked
+as the latest stable release.
+
+The manual Release workflow requires an existing tag and also publishes; it is
+not a preview. Never move an existing version tag or rerun publication for an
+already published release. A failed upload or verification leaves an unpublished
+draft and blocks reruns; inspect that exact draft before manually removing it
+and retrying. The script never deletes or replaces a release or its assets.
+If the final publication request fails, inspect the release before any cleanup:
+GitHub may have published it before the response was lost.
+GitHub's tag checks and release update are separate API operations, so maintainers
+must keep version tags immutable during publication. Verify the new assets and
+checksum file after publication, and include compatibility and offline-copy
+requirements in the release notes.
 
 ## Code style
 
